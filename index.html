@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="th">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OCR Document Capture</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main>
+      <section class="center-page" id="homePage" aria-labelledby="homeTitle">
+        <div class="home-card">
+          <div class="brand-mark" aria-hidden="true">OCR</div>
+          <p class="eyebrow">Document Intelligence</p>
+          <h1 id="homeTitle">OCR Document Capture</h1>
+          <p class="hero-copy">อัปโหลดเอกสารหรือถ่ายภาพ แล้วจัดกรอบก่อนส่งเข้า OCR</p>
+          <div class="home-actions">
+            <button class="primary-tile" id="uploadBtn" type="button">
+              <span class="tile-icon">↑</span>
+              <span>Upload File</span>
+              <small>เลือกไฟล์จากอุปกรณ์</small>
+            </button>
+            <button class="secondary-tile" id="cameraBtn" type="button">
+              <span class="tile-icon">◉</span>
+              <span>Open Camera</span>
+              <small>ถ่ายภาพเอกสาร</small>
+            </button>
+          </div>
+          <p class="upload-note">รองรับ PDF, JPG, JPEG, PNG, TIFF และ BMP</p>
+          <p class="privacy-note">Private session: clear data anytime.</p>
+          <input id="fileInput" class="sr-only" type="file" accept=".pdf,.jpg,.jpeg,.png,.tif,.tiff,.bmp,application/pdf,image/jpeg,image/png,image/tiff,image/bmp,image/x-ms-bmp" />
+          <p class="message" id="homeMessage" role="status" hidden></p>
+        </div>
+      </section>
+
+      <section class="center-page" id="cameraPage" aria-labelledby="cameraTitle" hidden>
+        <div class="camera-card">
+          <div class="card-head">
+            <div>
+              <p class="eyebrow">Camera Capture</p>
+              <h1 id="cameraTitle">วางเอกสารในกรอบ</h1>
+            </div>
+            <button class="ghost-btn" id="backHomeBtn" type="button">กลับ</button>
+          </div>
+          <label class="field-label" for="presetSelect">ประเภทกรอบเอกสาร</label>
+          <select class="select-input" id="presetSelect">
+            <option value="idCard">ID Card 1000 x 630</option>
+            <option value="passport">Passport 1000 x 700</option>
+            <option value="a4Portrait">A4 Portrait 1240 x 1754</option>
+            <option value="a4Landscape">A4 Landscape 1754 x 1240</option>
+          </select>
+          <div class="camera-stage" id="cameraStage">
+            <video id="video" autoplay playsinline muted></video>
+            <div class="capture-frame" id="captureFrame"></div>
+            <div class="camera-placeholder" id="cameraPlaceholder">กำลังเปิดกล้อง...</div>
+          </div>
+          <p class="hint">จัดเอกสารให้อยู่ภายในกรอบ ภาพจะถูกครอบและแปลงเป็น JPG ตามขนาดที่เลือก</p>
+          <div class="camera-actions">
+            <button class="primary-btn" id="captureBtn" type="button" disabled>ถ่ายภาพ</button>
+            <button class="secondary-btn" id="restartCameraBtn" type="button">เปิดกล้องใหม่</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="workspace" id="previewPage" hidden>
+        <aside class="sidebar">
+          <div class="sidebar-head">
+            <div>
+              <p class="eyebrow">Configuration</p>
+              <h2>เลือก OCR API</h2>
+            </div>
+            <span class="count-pill">9 APIs</span>
+          </div>
+          <details class="api-picker mobile-collapsible" data-mobile-collapse open>
+            <summary>
+              <span>เปลี่ยน OCR API</span>
+              <small>เลือก service สำหรับเอกสารนี้</small>
+            </summary>
+            <p class="field-label">API Connection</p>
+            <p class="connection-status">Backend Proxy · Server-managed</p>
+            <div class="api-list" id="apiList"></div>
+            <button class="secondary-btn full-btn cancel-btn" id="cancelOcrBtn" type="button" hidden>Cancel OCR Request</button>
+          </details>
+        </aside>
+
+        <div class="content">
+          <header class="content-head">
+            <div>
+              <p class="eyebrow">OCR Workspace</p>
+              <h1>ตรวจสอบเอกสารก่อนประมวลผล</h1>
+            </div>
+            <div class="content-actions">
+              <button class="secondary-btn" id="newImageBtn" type="button">เลือกภาพใหม่</button>
+              <button class="secondary-btn danger-btn" id="clearDataBtn" type="button">Clear Data</button>
+            </div>
+          </header>
+
+          <div class="status-strip">
+            <div><span class="status-dot"></span><strong id="selectedApiLabel">OCR API</strong></div>
+            <details class="workspace-advanced mobile-collapsible" data-mobile-collapse open>
+              <summary>Advanced</summary>
+              <div class="strip-actions">
+                <label class="switch"><input id="mockMode" type="checkbox" /><span></span> Mock Mode</label>
+                <label class="switch"><input id="debugMode" type="checkbox" /><span></span> Debug</label>
+              </div>
+            </details>
+          </div>
+          <p class="message workspace-message" id="workspaceMessage" role="status" hidden></p>
+          <div class="stepper" aria-label="Document workflow">
+            <div class="step active" id="cropStep"><b>1</b><span>Crop</span></div>
+            <div class="step" id="previewStep"><b>2</b><span>Preview</span></div>
+            <div class="step" id="resultStep"><b>3</b><span>Result</span></div>
+          </div>
+
+          <div class="grid">
+            <section class="panel preview-panel">
+              <div class="panel-head">
+                <div>
+                  <h2 id="documentPanelTitle">Crop Document</h2>
+                  <span id="imageMeta">ยังไม่มีเอกสาร</span>
+                </div>
+                <span class="stage-badge" id="fileModeBadge">Original</span>
+              </div>
+              <div class="pdf-page-panel" id="pdfPagePanel" hidden>
+                <div class="pdf-page-head">
+                  <div>
+                    <strong id="pdfPageTitle">PDF Pages</strong>
+                    <span id="pdfPageMeta">เลือกหน้าที่ต้องการ OCR</span>
+                  </div>
+                  <button class="primary-btn small-btn" id="ocrSelectedPdfPageBtn" type="button">OCR Selected Page</button>
+                </div>
+                <div class="pdf-page-grid" id="pdfPageGrid" aria-label="PDF page selector"></div>
+              </div>
+              <div class="crop-stage" id="cropStage">
+                <img class="crop-image" id="previewImg" alt="Document preview" draggable="false" hidden />
+                <object class="preview-doc" id="previewDoc" type="application/pdf" hidden></object>
+                <div class="preview-placeholder" id="previewPlaceholder" hidden></div>
+                <div class="crop-box" id="cropBox" hidden>
+                  <span class="resize-handle nw" data-resize="nw"></span>
+                  <span class="resize-handle ne" data-resize="ne"></span>
+                  <span class="resize-handle sw" data-resize="sw"></span>
+                  <span class="resize-handle se" data-resize="se"></span>
+                </div>
+              </div>
+              <div class="toolbar" id="cropToolbar">
+                <button class="secondary-btn small-btn" id="autoDetectBtn" type="button">Auto Detect Document</button>
+                <button class="secondary-btn small-btn" id="trimWhiteBtn" type="button">Trim White Area</button>
+                <button class="secondary-btn small-btn" id="resetCropBtn" type="button">Reset Crop</button>
+                <button class="primary-btn small-btn" id="applyCropBtn" type="button">Apply Crop</button>
+                <button class="secondary-btn small-btn" id="skipCropBtn" type="button">Skip Crop</button>
+              </div>
+              <div class="toolbar" id="previewToolbar" hidden>
+                <button class="tool-btn" id="zoomOutBtn" type="button" aria-label="Zoom out">−</button>
+                <button class="tool-btn" id="zoomInBtn" type="button" aria-label="Zoom in">+</button>
+                <button class="secondary-btn small-btn" id="fitScreenBtn" type="button">Fit to Screen</button>
+                <button class="secondary-btn small-btn" id="actualSizeBtn" type="button">100%</button>
+                <button class="secondary-btn small-btn" id="resetViewBtn" type="button">Reset View</button>
+                <button class="secondary-btn small-btn" id="backToPdfPagesBtn" type="button" hidden>Back to PDF Pages</button>
+                <button class="secondary-btn small-btn" id="backToCropBtn" type="button">Back to Crop</button>
+                <button class="primary-btn small-btn" id="runOcrBtn" type="button">Run OCR</button>
+              </div>
+              <p class="hint" id="cropHint">ลากหรือปรับขนาดกรอบให้ครอบเอกสารทั้งใบ จากนั้นกด Apply Crop</p>
+              <div class="warning-list" id="warningList" hidden></div>
+            </section>
+
+            <section class="panel output-panel">
+              <div class="panel-head">
+                <div>
+                  <h2>OCR Result</h2>
+                  <span id="resultMeta">พร้อมประมวลผล</span>
+                </div>
+              </div>
+              <div class="tabs" role="tablist" aria-label="Result view">
+                <button class="tab active" id="textTab" type="button" role="tab">Plaintext</button>
+                <button class="tab" id="jsonTab" type="button" role="tab">JSON</button>
+              </div>
+              <pre class="text-output" id="textOutput">กด Run OCR เพื่อเริ่มประมวลผล</pre>
+              <pre class="json-output" id="jsonOutput" hidden>กด Run OCR เพื่อดู JSON</pre>
+              <div class="result-image-panel" id="resultImagePanel" hidden>
+                <h3>OCR Image Preview</h3>
+                <img id="ocrFaceImage" alt="OCR extracted image" />
+                <p id="ocrImageMessage"></p>
+              </div>
+              <details class="result-advanced mobile-collapsible" data-mobile-collapse open>
+                <summary>Advanced JSON & Payload</summary>
+                <div class="compare-panel" id="comparePanel" hidden>
+                  <div class="compare-json-grid">
+                    <div class="compare-json-card">
+                    <div class="compare-json-title">
+                        <div>
+                          <span>Original JSON</span>
+                        </div>
+                        <div class="compare-json-actions">
+                          <button class="secondary-btn small-btn" id="copyOriginalJsonBtn" type="button">Copy</button>
+                          <button class="secondary-btn small-btn" id="downloadOriginalJsonBtn" type="button">Download</button>
+                        </div>
+                      </div>
+                      <pre class="compare-json-output" id="compareRawJson"></pre>
+                    </div>
+                    <div class="compare-json-card processed">
+                    <div class="compare-json-title">
+                        <div>
+                          <span>Post Process JSON</span>
+                          <span class="compare-summary-inline" id="compareSummary">—</span>
+                        </div>
+                        <div class="compare-json-actions">
+                          <button class="secondary-btn small-btn" id="copyPostProcessJsonBtn" type="button">Copy</button>
+                          <button class="secondary-btn small-btn" id="downloadPostProcessJsonBtn" type="button">Download</button>
+                        </div>
+                      </div>
+                      <pre class="compare-json-output" id="compareCleanJson"></pre>
+                    </div>
+                  </div>
+                </div>
+                <details class="encoded-payload-panel" id="encodedPayloadPanel" hidden>
+                  <summary>Encoded Payloads</summary>
+                  <div class="encoded-payload-controls">
+                    <select class="select-input" id="encodedPayloadSelect" aria-label="Encoded payload"></select>
+                    <button class="secondary-btn small-btn" id="encodedPayloadToggleBtn" type="button">Show Full</button>
+                    <button class="secondary-btn small-btn" id="encodedPayloadCopyBtn" type="button">Copy Full</button>
+                  </div>
+                  <textarea class="encoded-payload-output" id="encodedPayloadOutput" readonly spellcheck="false"></textarea>
+                </details>
+              </details>
+              <div class="output-actions">
+                <button class="secondary-btn small-btn" id="copyJsonBtn" type="button" disabled>Copy JSON</button>
+                <button class="secondary-btn small-btn" id="downloadTextBtn" type="button" disabled>Download Text</button>
+                <button class="secondary-btn small-btn" id="downloadJsonBtn" type="button" disabled>Download JSON</button>
+              </div>
+            </section>
+          </div>
+
+          <details class="debug-panel" id="debugPanel" hidden>
+            <summary>API Debug Panel</summary>
+            <pre id="debugOutput"></pre>
+          </details>
+        </div>
+      </section>
+    </main>
+    <div class="loading" id="loading" hidden><div class="loading-card"><span class="spinner"></span><strong>กำลังประมวลผล OCR</strong><small>กรุณารอสักครู่</small><button class="secondary-btn small-btn" id="loadingCancelBtn" type="button">ยกเลิก Request</button></div></div>
+    <canvas id="workCanvas" class="sr-only"></canvas>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
