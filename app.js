@@ -91,7 +91,7 @@ function bindEvents() {
   els.restartCameraBtn.addEventListener("click", startCamera);
   els.captureBtn.addEventListener("click", captureFromCamera);
   els.presetSelect.addEventListener("change", (event) => { state.preset = event.target.value; renderCameraFrame(); });
-  els.apiList.addEventListener("click", (event) => {
+  els.apiList.addEventListener("click", async (event) => {
     const button = event.target.closest("[data-api-id]");
     if (!button) return;
     state.selectedApiId = button.dataset.apiId;
@@ -99,6 +99,7 @@ function bindEvents() {
     clearOcrResultData();
     render();
     showSelectedApiNotice();
+    if (state.workspaceMode === "preview" && !state.isPdfMode && !state.cropBox && canProcess(state.originalFile)) await prepareFullDocumentPreview();
   });
   els.autoDetectBtn.addEventListener("click", () => detectAndSetCrop(false));
   els.trimWhiteBtn.addEventListener("click", () => detectAndSetCrop(true));
@@ -173,9 +174,9 @@ async function useFile(file) {
   state.originalImageUrl = URL.createObjectURL(file);
   state.warnings = await analyzeFile(file);
   state.page = "workspace";
-  state.workspaceMode = canProcess(file) ? "crop" : "preview";
+  state.workspaceMode = "preview";
   render();
-  if (canProcess(file)) await detectAndSetCrop(false);
+  if (canProcess(file)) await prepareFullDocumentPreview();
 }
 
 async function loadPdfFile(file) {
@@ -397,7 +398,13 @@ async function applyCrop() {
 }
 async function skipCrop() {
   if (state.isPdfMode) return showMessage("workspace", "ไฟล์ PDF ต้องเลือกหน้าและ Apply Crop ก่อนเรียก OCR", true);
+  await prepareFullDocumentPreview();
+}
+async function prepareFullDocumentPreview() {
   try {
+    state.cropBox = null;
+    state.detectedCropBox = null;
+    state.manualCropBox = null;
     if (canProcess(state.originalFile)) {
       const processed = await resizeAndEnhanceImage(state.originalFile, getSelectedApi());
       state.processedFile = processed;
@@ -410,11 +417,21 @@ async function skipCrop() {
     }
     enterPreviewMode();
   } catch {
-    showMessage("workspace", "สร้างภาพ JPG สำหรับ OCR ไม่สำเร็จ กรุณาลอง Apply Crop หรืออัปโหลดไฟล์ใหม่", true);
+    state.processedFile = null;
+    state.processedImageInfo = null;
+    setProcessedImageUrl(null);
+    addWarning("เตรียมภาพเต็มใบสำหรับ OCR ไม่สำเร็จ ระบบจะแสดงและส่งไฟล์ต้นฉบับแทน");
+    enterPreviewMode();
   }
 }
 function enterPreviewMode() { clearOcrResultData(); state.workspaceMode = "preview"; resetPreviewView(); render(); }
-function backToCrop() { if (!canProcess(getCropSourceFile())) return; clearOcrResultData(); state.workspaceMode = "crop"; render(); }
+async function backToCrop() {
+  if (!canProcess(getCropSourceFile())) return;
+  clearOcrResultData();
+  state.workspaceMode = "crop";
+  render();
+  if (!state.cropBox) await detectAndSetCrop(false);
+}
 function backToPdfPages() { clearSelectedPdfPageData(); state.workspaceMode = "pdf-pages"; render(); }
 
 async function cropOriginalImage() {
@@ -648,22 +665,24 @@ function renderWorkspace() {
   const pdfPageMode = state.workspaceMode === "pdf-pages", cropMode = state.workspaceMode === "crop", processable = canProcess(getCropSourceFile());
   els.documentPanelTitle.textContent = pdfPageMode ? "Select PDF Page" : cropMode ? "Crop Document" : "Preview Document";
   const processedPreview = state.workspaceMode === "preview" && (state.processedFile || state.processedPdfPageFile);
-  els.fileModeBadge.textContent = pdfPageMode ? "PDF Pages" : cropMode ? (state.isPdfMode ? "PDF Page Image" : "Original Image") : processedPreview ? "Crop + Resize + Enhance" : "Original File";
+  const preparedLabel = state.cropBox ? "Crop + Resize + Enhance" : "Prepared + Enhance";
+  els.fileModeBadge.textContent = pdfPageMode ? "PDF Pages" : cropMode ? (state.isPdfMode ? "PDF Page Image" : "Original Image") : processedPreview ? preparedLabel : "Original File";
   els.pdfPagePanel.hidden = !pdfPageMode;
   els.cropStage.hidden = pdfPageMode;
   els.cropToolbar.hidden = !cropMode || !processable;
   els.skipCropBtn.hidden = state.isPdfMode;
   els.previewToolbar.hidden = cropMode || pdfPageMode;
   els.backToPdfPagesBtn.hidden = !(state.isPdfMode && state.workspaceMode === "preview");
-  els.cropHint.textContent = pdfPageMode ? "เลือกหน้า PDF ที่ต้องการ OCR ระบบจะ render เป็นภาพ JPG แล้วส่งเข้า Crop Document Mode" : cropMode ? "ลากหรือปรับขนาดกรอบให้ครอบเอกสารทั้งใบ จากนั้นกด Apply Crop" : "ลากภาพเพื่อเลื่อนดูรายละเอียด หรือใช้ Zoom / Fit to Screen / 100%";
+  els.cropHint.textContent = pdfPageMode ? "เลือกหน้า PDF ที่ต้องการ OCR ระบบจะ render เป็นภาพ JPG แล้วส่งเข้า Crop Document Mode" : cropMode ? "ลากหรือปรับขนาดกรอบให้ครอบเอกสารทั้งใบ จากนั้นกด Apply Crop" : "ตรวจภาพก่อน Run OCR หากต้องแก้กรอบให้กด Edit / Crop หรือใช้ Zoom / Fit to Screen / 100%";
   const displayFile = getActiveDisplayFile();
   els.imageMeta.textContent = buildImageMeta(displayFile);
   renderPdfPageSelector(); renderSteps(); renderDocumentImage(); renderWarnings();
 }
 function renderSteps() {
-  const hasResult = Boolean(state.ocrResult), previewMode = state.workspaceMode === "preview", pdfPageMode = state.workspaceMode === "pdf-pages";
-  els.cropStep.className = `step ${previewMode ? "complete" : pdfPageMode || state.workspaceMode === "crop" ? "active" : ""}`;
-  els.previewStep.className = `step ${previewMode && !hasResult ? "active" : hasResult ? "complete" : ""}`;
+  const hasResult = Boolean(state.ocrResult), previewMode = state.workspaceMode === "preview", cropMode = state.workspaceMode === "crop", pdfPageMode = state.workspaceMode === "pdf-pages";
+  const hasEditedCrop = Boolean(state.cropBox && (state.processedFile || state.processedPdfPageFile));
+  els.cropStep.className = `step ${previewMode && !hasResult ? "active" : hasResult || cropMode || pdfPageMode ? "complete" : ""}`;
+  els.previewStep.className = `step ${cropMode || pdfPageMode ? "active" : hasEditedCrop || hasResult ? "complete" : ""}`;
   els.resultStep.className = `step ${hasResult ? "active" : ""}`;
 }
 function renderPdfPageSelector() {
@@ -1474,7 +1493,8 @@ function buildImageMeta(file) {
   if (state.workspaceMode === "pdf-pages") return `${state.originalFile.name} · PDF ทั้งหมด ${state.pdfTotalPages || 0} หน้า`;
   if (!file) return state.isPdfMode ? `${state.originalFile.name} · กรุณาเลือกหน้า PDF` : "ยังไม่มีเอกสาร";
   const pdfPage = state.isPdfMode ? ` · Page ${state.selectedPdfPageIndex + 1} of ${state.pdfTotalPages}` : "";
-  const dimensions = state.workspaceMode === "preview" && state.processedImageInfo ? ` · ${state.processedImageInfo.width} × ${state.processedImageInfo.height} px · Cropped / Enhanced / Ready for OCR` : "";
+  const readyLabel = state.cropBox ? "Cropped / Enhanced / Ready for OCR" : "Prepared / Enhanced / Ready for OCR";
+  const dimensions = state.workspaceMode === "preview" && state.processedImageInfo ? ` · ${state.processedImageInfo.width} × ${state.processedImageInfo.height} px · ${readyLabel}` : "";
   return `${file.name}${pdfPage} · ${formatBytes(file.size)}${dimensions}`;
 }
 function canPreviewImage() { return canProcess(getActiveDisplayFile()); }
