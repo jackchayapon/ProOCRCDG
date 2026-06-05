@@ -966,12 +966,12 @@ async function extractImagePreview(payload, api) {
   }
 }
 async function buildUploadedFileImagePreview(decodedPreview, api) {
-  const sourceFile = state.isPdfMode ? state.selectedPdfPageImageFile : state.originalFile;
+  const sourceFile = getOcrImagePreviewSourceFile();
   if (!sourceFile || !canProcess(sourceFile)) return null;
 
   const previewImage = await loadImageFromSrc(decodedPreview.src);
   const sourceImage = await loadImage(sourceFile);
-  const documentBox = getOriginalDocumentBox(sourceImage);
+  const documentBox = getOcrImagePreviewDocumentBox(sourceImage, sourceFile);
   const matchedRegion = findUploadedImageMatchRegion(sourceImage, previewImage, documentBox);
   const region = matchedRegion || getKnownDocumentImageRegion(api, previewImage, documentBox);
   if (!region) return null;
@@ -987,8 +987,19 @@ async function buildUploadedFileImagePreview(decodedPreview, api) {
   return {
     src: canvas.toDataURL("image/jpeg", 0.94),
     key: decodedPreview.key,
-    message: `${matchedRegion ? "Source: uploaded file color match" : "Source: uploaded file"} (${decodedPreview.key})`,
+    message: `${matchedRegion ? "Source: preview color match" : "Source: preview fallback"} (${decodedPreview.key})`,
   };
+}
+function getOcrImagePreviewSourceFile() {
+  if (state.isPdfMode) return state.processedPdfPageFile || state.selectedPdfPageImageFile;
+  return state.processedFile || state.originalFile;
+}
+function getOcrImagePreviewDocumentBox(sourceImage, sourceFile) {
+  const rawSourceFile = state.isPdfMode ? state.selectedPdfPageImageFile : state.originalFile;
+  if (sourceFile === rawSourceFile) return getOriginalDocumentBox(sourceImage);
+  const width = sourceImage.naturalWidth || sourceImage.width;
+  const height = sourceImage.naturalHeight || sourceImage.height;
+  return { x: 0, y: 0, width, height };
 }
 function getOriginalDocumentBox(sourceImage) {
   const width = sourceImage.naturalWidth || sourceImage.width;
@@ -1023,7 +1034,7 @@ function findUploadedImageMatchRegion(sourceImage, previewImage, documentBox) {
   if (!best) return null;
 
   best = refineImagePreviewCandidate(scaledSource, targetFeature, best, sampleWidth, sampleHeight);
-  if (!best || best.score < 0.18) return null;
+  if (!isReliableImagePreviewMatch(best, scaledSource)) return null;
 
   return {
     x: documentBox.x + best.x / scaledSource.scale,
@@ -1031,6 +1042,12 @@ function findUploadedImageMatchRegion(sourceImage, previewImage, documentBox) {
     width: best.width / scaledSource.scale,
     height: best.height / scaledSource.scale,
   };
+}
+function isReliableImagePreviewMatch(best, source) {
+  if (!best || best.score < 0.36) return false;
+  const areaRatio = (best.width * best.height) / Math.max(1, source.width * source.height);
+  if (areaRatio < 0.01 || areaRatio > 0.45) return false;
+  return true;
 }
 function getScaledDocumentImageData(sourceImage, documentBox, maxDimension) {
   const scale = Math.min(1, maxDimension / Math.max(documentBox.width, documentBox.height));
