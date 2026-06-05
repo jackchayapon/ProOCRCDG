@@ -733,8 +733,9 @@ function getCropDisplayMetrics() {
 function getImageFitScale(width, height) { return Math.min(els.cropStage.clientWidth / width, els.cropStage.clientHeight / height); }
 function renderWarnings() { els.warningList.hidden = !state.warnings.length; els.warningList.innerHTML = state.warnings.map((warning) => `<div>• ${escapeHtml(warning)}</div>`).join(""); }
 function renderResult() {
-  els.textOutput.textContent = state.ocrResult?.plainText || "กด Run OCR เพื่อเริ่มประมวลผล";
-  els.jsonOutput.textContent = state.ocrResult ? JSON.stringify(state.ocrResult.rawJson, null, 2) : "กด Run OCR เพื่อดู JSON";
+  els.textOutput.textContent = getDisplayPlainText();
+  const displayJson = getDisplayJsonPayload();
+  els.jsonOutput.textContent = displayJson ? JSON.stringify(displayJson, null, 2) : "กด Run OCR เพื่อดู JSON";
   els.resultMeta.textContent = state.ocrResult ? `${state.ocrResult.apiLabel} · ${state.ocrResult.runtime} ms` : "พร้อมประมวลผล";
   [els.copyJsonBtn, els.downloadTextBtn, els.downloadJsonBtn].forEach((button) => button.disabled = !state.ocrResult);
   [els.copyOriginalJsonBtn, els.downloadOriginalJsonBtn, els.copyPostProcessJsonBtn, els.downloadPostProcessJsonBtn].forEach((button) => {
@@ -774,6 +775,20 @@ function getCompareOriginalJson() {
 function getComparePostProcessJson() {
   if (!state.ocrResultClean) return null;
   return state.ocrResultClean.normalized || state.ocrResultClean;
+}
+function getDisplayJsonPayload() {
+  return getComparePostProcessJson() || state.ocrResult?.rawJson || null;
+}
+function getDisplayPlainText() {
+  if (!state.ocrResult) return "กด Run OCR เพื่อเริ่มประมวลผล";
+  const postProcessText = formatPostProcessPlainText(getComparePostProcessJson());
+  return postProcessText || state.ocrResult.plainText || "OCR สำเร็จ แต่ไม่พบข้อความที่สามารถแสดงผลได้";
+}
+function formatPostProcessPlainText(payload) {
+  if (!payload) return "";
+  const source = unwrapOcrPayload(payload);
+  const fields = findReadableFields(source);
+  return formatFieldsAsText(fields);
 }
 function buildOrderedOriginalJson(raw, clean, changes) {
   const { cleanToRaw } = buildRenameMaps(changes);
@@ -1505,7 +1520,12 @@ function escapeHtml(value) { return String(value).replace(/[&<>"']/g, (char) => 
 function formatBytes(bytes) { if (!bytes) return "0 B"; const units = ["B","KB","MB","GB"], index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1); return `${(bytes / 1024 ** index).toFixed(index && bytes / 1024 ** index < 10 ? 1 : 0)} ${units[index]}`; }
 async function refreshApiStatus() { try { const response = await fetch("/api/ocr/status"); if (!response.ok) return; state.apiStatus = (await response.json()).apis || {}; renderApiList(); showSelectedApiNotice(); } catch { showMessage("workspace", "เชื่อมต่อ Backend Proxy ไม่สำเร็จ กรุณาเปิดระบบด้วย python OCR/Backend/P2.py หรือ uvicorn OCR.Backend.P2:app --host 127.0.0.1 --port 3000", true); } }
 function showSelectedApiNotice() { const api = getSelectedApi(); if (api.authRequired && state.apiStatus[api.id]?.available === false) showMessage("workspace", "API Other ต้องใช้ token ฝั่ง server: กำหนด OCR_OTHER_AUTH_TOKEN ในไฟล์ .env แล้วเปิด server ใหม่", true); else if (!state.loading) els.workspaceMessage.hidden = true; }
-async function copyJson() { if (!state.ocrResult) return; await navigator.clipboard.writeText(JSON.stringify(state.ocrResult.rawJson, null, 2)); showMessage("workspace", "Copy JSON เรียบร้อยแล้ว"); }
+async function copyJson() {
+  const payload = getDisplayJsonPayload();
+  if (!payload) return;
+  await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+  showMessage("workspace", "Copy JSON เรียบร้อยแล้ว");
+}
 async function copyCompareOriginalJson() {
   const payload = getCompareOriginalJson();
   if (!payload) return;
@@ -1524,8 +1544,11 @@ async function copyEncodedPayload() {
   await navigator.clipboard.writeText(payload.value);
   showMessage("workspace", "Copy encoded payload แบบเต็มเรียบร้อยแล้ว");
 }
-function downloadText() { if (state.ocrResult) downloadFile(state.ocrResult.plainText, "text/plain", "txt"); }
-function downloadJson() { if (state.ocrResult) downloadFile(JSON.stringify(state.ocrResult.rawJson, null, 2), "application/json", "json"); }
+function downloadText() { if (state.ocrResult) downloadFile(getDisplayPlainText(), "text/plain", "txt"); }
+function downloadJson() {
+  const payload = getDisplayJsonPayload();
+  if (payload) downloadFile(JSON.stringify(payload, null, 2), "application/json", "json");
+}
 function downloadCompareOriginalJson() {
   const payload = getCompareOriginalJson();
   if (payload) downloadFile(JSON.stringify(payload, null, 2), "application/json", "json", "ocr-original-json");
