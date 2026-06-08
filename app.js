@@ -3,7 +3,7 @@ const RUNTIME_CONFIG = {
   PREPROCESS_URL: "/api/image/preprocess",
   POSTPROCESS_URL: "/api/ocr/postprocess",
   REQUEST_TIMEOUT_MS: 45000,
-  USE_IMAGE_PREPROCESS: true,
+  USE_IMAGE_PREPROCESS: false,
   USE_MOCK_OCR: false,
   OCR_TRACE_CLIENT: false,
   ...(window.OCR_RUNTIME_CONFIG || {}),
@@ -537,8 +537,8 @@ async function runOcr() {
         if (!response.ok) throw new Error(getErrorText(payload) || `HTTP ${response.status}`);
       }
     } finally { clearTimeout(timeout); }
-    state.ocrResult = await normalizeOcrResponse(payload, api, Math.round(performance.now() - started));
     state.ocrResultClean = await runPostprocess(payload, api);
+    state.ocrResult = await normalizeOcrResponse(payload, api, Math.round(performance.now() - started), state.ocrResultClean);
     state.ocrImagePreview = state.ocrResult.imagePreview || { src: "", key: "", message: "" };
     state.encodedPayloads = state.ocrResult.encodedPayloads || [];
     state.selectedEncodedPayloadIndex = 0;
@@ -975,11 +975,13 @@ function buildDebugInfo(api, file, status, runtime) {
   };
 }
 
-async function normalizeOcrResponse(rawJson, api, runtime) {
+async function normalizeOcrResponse(rawJson, api, runtime, postprocessResult = null) {
   const source = unwrapOcrPayload(rawJson), fields = findReadableFields(source), directText = findDirectText(source);
+  const normalizedFields = postprocessResult?.normalized || null;
   const encodedPayloads = collectEncodedPayloads(rawJson);
   const imagePreview = await extractImagePreview(rawJson, api);
-  return { rawJson: sanitizeOcrPayload(rawJson), plainText: directText || formatFieldsAsText(fields) || "OCR สำเร็จ แต่ไม่พบข้อความที่สามารถแสดงผลได้", fields, runtime, apiId: api.id, apiLabel: getApiDisplayLabel(api), outputMode: api.outputMode, imagePreview, encodedPayloads };
+  const plainText = formatFieldsAsText(normalizedFields) || directText || formatFieldsAsText(fields) || "OCR สำเร็จ แต่ไม่พบข้อความที่สามารถแสดงผลได้";
+  return { rawJson: sanitizeOcrPayload(rawJson), plainText, fields: normalizedFields || fields, runtime, apiId: api.id, apiLabel: getApiDisplayLabel(api), outputMode: api.outputMode, imagePreview, encodedPayloads };
 }
 function unwrapOcrPayload(payload) { const source = payload?.result ?? payload?.data ?? payload; return Array.isArray(source) ? source[0] ?? {} : source; }
 function findReadableFields(source) { if (!source || typeof source !== "object") return {}; return source.label || source.fields || source.result?.label || source.result?.fields || source; }
@@ -987,9 +989,15 @@ function findDirectText(source) { if (!source || typeof source !== "object") ret
 function formatFieldsAsText(fields, prefix = "") {
   if (!fields || typeof fields !== "object") return String(fields || "").trim();
   return Object.entries(fields).filter(([key, value]) => !isSensitivePayloadKey(key) && !(isImagePayloadKey(key) && typeof value === "string" && value.length > 80) && value !== "" && value != null).flatMap(([key, value]) => {
-    const label = prefix ? `${prefix}.${key}` : key;
-    if (Array.isArray(value)) return value.map((item, index) => formatFieldsAsText(item, `${label}[${index + 1}]`)).filter(Boolean);
-    if (typeof value === "object") return formatFieldsAsText(value, label);
+    const label = key;
+    if (Array.isArray(value)) {
+      if (value.every((item) => item == null || typeof item !== "object")) {
+        const text = value.filter((item) => item != null && item !== "").join(" / ");
+        return text ? `${label}: ${text}` : "";
+      }
+      return value.map((item) => formatFieldsAsText(item)).filter(Boolean);
+    }
+    if (typeof value === "object") return formatFieldsAsText(value);
     return `${label}: ${value}`;
   }).filter(Boolean).join("\n");
 }

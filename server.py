@@ -1,10 +1,11 @@
 import os
+from datetime import datetime, timezone
 from email.parser import BytesParser
 from email.policy import default
 from functools import partial
 from pathlib import Path
+from uuid import uuid4
 import json
-import time
 import requests
 import uvicorn
 from fastapi import FastAPI, Request
@@ -12,14 +13,6 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 import re
 import unicodedata
-from ocr_trace import (
-    append_trace_meta,
-    get_or_create_trace_run_dir,
-    is_trace_enabled,
-    run_postman_like_ocr,
-    save_trace_file,
-    save_trace_json,
-)
 
 ROOT = Path(__file__).resolve().parent
 FRONTEND_ROOT = Path(os.environ.get("FRONTEND_ROOT", ROOT)).resolve()
@@ -45,12 +38,20 @@ load_env_file(ROOT / ".env")
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "3000"))
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_PREPROCESS_REQUEST_BYTES = (MAX_UPLOAD_BYTES * 2) + (1024 * 1024)
 REQUEST_TIMEOUT_SECONDS = 45
 WEBSOLUTION_BASE_URL = os.environ.get("WEBSOLUTION_BASE_URL", "https://websolution.cdgs.co.th").rstrip("/")
+IMAGE_STORAGE_ROOT = Path(
+    os.environ.get("OCR_IMAGE_STORAGE_DIR", str(ROOT / "stored_images"))
+).resolve()
+ORIGINAL_IMAGE_DIR = IMAGE_STORAGE_ROOT / "original"
+PREPROCESSED_IMAGE_DIR = IMAGE_STORAGE_ROOT / "preprocessed"
 PREPROCESS_TARGETS = {
     "idCard": (1000, 630),
     "passport": (1000, 700),
 }
+OVEREXPOSED_BRIGHTNESS_THRESHOLD = 215
+BRIGHT_IMAGE_TARGET_MEAN = 185
 # Keep upstream routing and secrets on the server. The browser sends only apiId and a file.
 PROXY_APIS = {
     "front-id": {
@@ -126,7 +127,9 @@ KEY_TRANSLATION_PROFILES: dict[str, dict[str, str]] = {
         "Title": "คำนำหน้า", "Gender": "เพศ",
     },
     "front-id-other": {
+        "idNumber": "เลขประจำตัวประชาชน",
         "id_number": "เลขประจำตัวประชาชน",
+        "runtime": "เวลาประมวลผล",
         "name": "ชื่อ-นามสกุล",
         "dob": "วันเกิด", "doi": "วันออกบัตร", "doe": "วันหมดอายุ",
         "address": "ที่อยู่",
@@ -181,6 +184,37 @@ KEY_TRANSLATION_PROFILES: dict[str, dict[str, str]] = {
     },
 }
 
+PATH_TRANSLATION_PROFILES: dict[str, dict[tuple[str, ...], str]] = {
+    "front-id-other": {
+        ("th",): "ข้อมูลภาษาไทย",
+        ("th", "fullName"): "ชื่อเต็มภาษาไทย",
+        ("th", "prefix"): "คำนำหน้า (ไทย)",
+        ("th", "name"): "ชื่อ (ไทย)",
+        ("th", "lastName"): "นามสกุล (ไทย)",
+        ("th", "dateOfBirth"): "วันเกิด (ไทย)",
+        ("th", "dateOfIssue"): "วันออกบัตร (ไทย)",
+        ("th", "dateOfExpiry"): "วันหมดอายุ (ไทย)",
+        ("th", "religion"): "ศาสนา",
+        ("th", "address"): "ที่อยู่ (ไทย)",
+        ("th", "address", "full"): "ที่อยู่เต็ม",
+        ("th", "address", "firstPart"): "ที่อยู่บรรทัดแรก",
+        ("th", "address", "subdistrict"): "ตำบล/แขวง",
+        ("th", "address", "district"): "อำเภอ/เขต",
+        ("th", "address", "province"): "จังหวัด",
+        ("en",): "ข้อมูลภาษาอังกฤษ",
+        ("en", "prefix"): "คำนำหน้า (อังกฤษ)",
+        ("en", "name"): "ชื่อ (อังกฤษ)",
+        ("en", "lastName"): "นามสกุล (อังกฤษ)",
+        ("en", "dateOfBirth"): "วันเกิด (อังกฤษ)",
+        ("en", "dateOfIssue"): "วันออกบัตร (อังกฤษ)",
+        ("en", "dateOfExpiry"): "วันหมดอายุ (อังกฤษ)",
+    },
+    "passport-custom": {
+        ("result",): "ผลลัพธ์",
+        ("result", "label"): "ข้อมูลพาสปอร์ต",
+    },
+}
+
 FIELD_ORDER_PROFILES: dict[str, list[str]] = {
     "front-id": [
         "เลขประจำตัวประชาชน", "คำนำหน้า",
@@ -195,8 +229,11 @@ FIELD_ORDER_PROFILES: dict[str, list[str]] = {
         "วันเกิด", "ศาสนา", "ที่อยู่", "วันออกบัตร", "วันหมดอายุ",
     ],
     "front-id-other": [
-        "เลขประจำตัวประชาชน", "ชื่อ-นามสกุล",
-        "วันเกิด", "ที่อยู่", "วันออกบัตร", "วันหมดอายุ",
+        "เลขประจำตัวประชาชน", "ข้อมูลภาษาไทย", "ชื่อเต็มภาษาไทย", "คำนำหน้า (ไทย)", "ชื่อ (ไทย)",
+        "นามสกุล (ไทย)", "วันเกิด (ไทย)", "วันออกบัตร (ไทย)", "วันหมดอายุ (ไทย)", "ศาสนา",
+        "ที่อยู่ (ไทย)", "ที่อยู่เต็ม", "ที่อยู่บรรทัดแรก", "ตำบล/แขวง", "อำเภอ/เขต", "จังหวัด",
+        "ข้อมูลภาษาอังกฤษ", "คำนำหน้า (อังกฤษ)", "ชื่อ (อังกฤษ)", "นามสกุล (อังกฤษ)",
+        "วันเกิด (อังกฤษ)", "วันออกบัตร (อังกฤษ)", "วันหมดอายุ (อังกฤษ)", "เวลาประมวลผล",
     ],
     "back-id": [
         "เลขหลังบัตร", 
@@ -208,40 +245,25 @@ FIELD_ORDER_PROFILES: dict[str, list[str]] = {
         "เลขหลังบัตร", 
     ],
     "passport": [
-        "ประเภทเอกสาร",
-        "ประเทศที่ออก",
-        "เลขพาสปอร์ต",
-        "นามสกุล (อังกฤษ)",
-        "ชื่อ (อังกฤษ)",
-        "ชื่อ (ไทย)",
-        "สัญชาติ",
-        "วันเกิด",
-        "เลขประจำตัวประชาชน",
-        "เพศ",
-        "ส่วนสูง",
-        "สถานที่เกิด",
-        "วันออกเอกสาร",
-        "วันหมดอายุ",
-        "MRZ บรรทัด 1",
-        "MRZ บรรทัด 2",
+        "ประเภทเอกสาร","ประเทศที่ออก","เลขพาสปอร์ต",
+        "นามสกุล", "นามสกุล (อังกฤษ)", "ชื่อ-นามสกุล",
+        "ชื่อ",  "ชื่อ (อังกฤษ)","ชื่อ (ไทย)",
+        "สัญชาติ", "วันเกิด","เลขประจำตัวประชาชน",
+        "เพศ","ส่วนสูง", "สถานที่เกิด",
+        "วันออกเอกสาร", "วันหมดอายุ",
+        "หน่วยงานออกเอกสาร",
+        "MRZ", "MRZ บรรทัด 1", "MRZ บรรทัด 2",
     ],
     "passport-custom": [
-        "ประเภทเอกสาร",
-        "ประเทศที่ออก",
-        "เลขพาสปอร์ต",
-        "นามสกุล (อังกฤษ)",
-        "ชื่อ (อังกฤษ)",
-        "ชื่อ (ไทย)",
-        "สัญชาติ",
-        "วันเกิด",
-        "เลขประจำตัวประชาชน",
-        "เพศ",
-        "ส่วนสูง",
-        "สถานที่เกิด",
-        "วันออกเอกสาร",
-        "วันหมดอายุ",
-        "MRZ บรรทัด 1",
-        "MRZ บรรทัด 2",
+        "ผลลัพธ์", "ข้อมูลพาสปอร์ต",
+        "ประเภทเอกสาร","ประเทศที่ออก","เลขพาสปอร์ต",
+        "นามสกุล", "นามสกุล (อังกฤษ)", "ชื่อ-นามสกุล",
+        "ชื่อ",  "ชื่อ (อังกฤษ)","ชื่อ (ไทย)",
+        "สัญชาติ", "วันเกิด","เลขประจำตัวประชาชน",
+        "เพศ","ส่วนสูง", "สถานที่เกิด",
+        "วันออกเอกสาร", "วันหมดอายุ",
+        "หน่วยงานออกเอกสาร",
+        "MRZ", "MRZ บรรทัด 1", "MRZ บรรทัด 2",
     ],
 
 }
@@ -318,18 +340,19 @@ SENSITIVE_KEY_RE = re.compile(
 )
 
 
-def _translate_keys(value, key_map: dict, changes: list, depth: int = 0):
+def _translate_keys(value, key_map: dict, changes: list, depth: int = 0, path_map: dict | None = None, path: tuple[str, ...] = ()):
     if depth > 10:
         return value
     if isinstance(value, list):
-        return [_translate_keys(item, key_map, changes, depth + 1) for item in value]
+        return [_translate_keys(item, key_map, changes, depth + 1, path_map, path) for item in value]
     if isinstance(value, dict):
         result = {}
         for k, v in value.items():
-            new_k = key_map.get(str(k), k)
+            child_path = (*path, str(k))
+            new_k = (path_map or {}).get(child_path, key_map.get(str(k), k))
             if new_k != k:
                 changes.append(f"renamed: {k} → {new_k}")
-            result[new_k] = _translate_keys(v, key_map, changes, depth + 1)
+            result[new_k] = _translate_keys(v, key_map, changes, depth + 1, path_map, child_path)
         return result
     return value
 
@@ -359,14 +382,15 @@ def postprocess_ocr(raw_payload: dict, api_id: str = "") -> dict:
     key_map = KEY_TRANSLATION_PROFILES.get(api_id, {})
     if api_id in FRONT_ID_API_IDS:
         key_map = {**key_map, **ID_CARD_LABEL_ALIASES}
-    translated = _translate_keys(raw_payload, key_map, changes) if key_map else raw_payload
+    path_map = PATH_TRANSLATION_PROFILES.get(api_id, {})
+    translated = _translate_keys(raw_payload, key_map, changes, path_map=path_map) if key_map or path_map else raw_payload
 
     field_order = FIELD_ORDER_PROFILES.get(api_id, [])
-    if api_id in FRONT_ID_API_IDS:
+    if api_id in FRONT_ID_API_IDS and api_id != "front-id-other":
         field_order = [*ID_CARD_FIELD_ORDER, *field_order]
     reordered = _reorder_fields(translated, field_order) if field_order else translated
 
-    if key_map:
+    if key_map or path_map:
         changes.append(f"key translation profile: {api_id}")
     if field_order:
         changes.append(f"field order profile: {api_id}")
@@ -392,41 +416,6 @@ def no_store_json(status_code, payload):
     )
 
 
-def safe_trace_call(func, *args, **kwargs):
-    try:
-        return func(*args, **kwargs)
-    except Exception:
-        return None
-
-
-def parse_trace_meta(value):
-    if not value:
-        return {}
-    try:
-        parsed = json.loads(value)
-        return parsed if isinstance(parsed, dict) else {}
-    except (TypeError, json.JSONDecodeError):
-        return {}
-
-
-def get_trace_run_dir(api_id="", trace_run_id=""):
-    return safe_trace_call(get_or_create_trace_run_dir, api_id or None, trace_run_id or None)
-
-
-def response_body_for_trace(response):
-    content_type = response.headers.get("Content-Type", "")
-    try:
-        body = response.json()
-    except ValueError:
-        text = response.text or ""
-        body = {"textPreview": text[:4000], "textLength": len(text)}
-    return {
-        "statusCode": response.status_code,
-        "contentType": content_type,
-        "body": body,
-    }
-
-
 def parse_content_length(request):
     raw_value = request.headers.get("content-length", "0")
     try:
@@ -445,12 +434,68 @@ def get_preprocess_target(fields):
     return None
 
 
-def cv2_preprocess_image(image_bytes, target_size):
+def get_preprocess_profile(fields):
+    api_id = fields.get("apiId", "")
+    document_type = fields.get("documentType", "")
+    if api_id.startswith("back-id") or document_type == "back-id":
+        return "back-id"
+    if api_id.startswith("front-id") or document_type == "front-id":
+        return "front-id"
+    if api_id.startswith("passport") or document_type == "passport":
+        return "passport"
+    return ""
+
+
+def safe_storage_extension(filename, content_type, default=".jpg"):
+    extension = Path(filename or "").suffix.lower()
+    allowed_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+    if extension in allowed_extensions:
+        return extension
+    content_type_extensions = {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/bmp": ".bmp",
+        "image/tiff": ".tiff",
+        "image/webp": ".webp",
+    }
+    return content_type_extensions.get(content_type or "", default)
+
+
+def save_preprocess_images(original_upload, preprocessed_bytes, api_id):
+    ORIGINAL_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+    PREPROCESSED_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    archive_id = f"{timestamp}-{uuid4().hex[:10]}"
+    safe_api_id = re.sub(r"[^a-zA-Z0-9_-]+", "-", api_id or "unknown").strip("-") or "unknown"
+    base_name = f"{archive_id}-{safe_api_id}"
+    original_extension = safe_storage_extension(
+        original_upload.get("filename", ""),
+        original_upload.get("content_type", ""),
+    )
+    original_path = ORIGINAL_IMAGE_DIR / f"{base_name}-original{original_extension}"
+    preprocessed_path = PREPROCESSED_IMAGE_DIR / f"{base_name}-preprocessed.jpg"
+
+    original_path.write_bytes(original_upload["content"])
+    preprocessed_path.write_bytes(preprocessed_bytes)
+    return {
+        "archiveId": archive_id,
+        "original": str(original_path.relative_to(IMAGE_STORAGE_ROOT)),
+        "preprocessed": str(preprocessed_path.relative_to(IMAGE_STORAGE_ROOT)),
+    }
+
+
+def cv2_preprocess_image(image_bytes, target_size, preprocess_profile=""):
     try:
         import cv2
         import numpy as np
     except ImportError as exc:
-        raise RuntimeError("OpenCV is not installed. Install opencv-python-headless and numpy.") from exc
+        return pillow_preprocess_image(
+            image_bytes,
+            target_size,
+            [f"OpenCV ไม่พร้อมใช้งาน ระบบใช้ Pillow fallback แทน: {exc}"],
+            preprocess_profile,
+        )
 
     raw = np.frombuffer(image_bytes, dtype=np.uint8)
     image = cv2.imdecode(raw, cv2.IMREAD_COLOR)
@@ -477,23 +522,24 @@ def cv2_preprocess_image(image_bytes, target_size):
         warnings.append("ภาพอาจเบลอ ควรถ่ายใหม่หรือใช้ภาพความละเอียดสูงขึ้น")
     if brightness < 75:
         warnings.append("ภาพค่อนข้างมืด ระบบปรับแสงให้ก่อนส่ง OCR แล้ว")
-    elif brightness > 215:
+    elif brightness > OVEREXPOSED_BRIGHTNESS_THRESHOLD:
         warnings.append("ภาพค่อนข้างสว่างมาก อาจมีส่วนรายละเอียดหาย")
     if contrast < 28:
         warnings.append("ภาพ contrast ต่ำ ระบบเพิ่ม contrast ให้ก่อนส่ง OCR แล้ว")
     if glare_ratio > 0.035:
         warnings.append("ตรวจพบพื้นที่สว่างจ้าหรือแสงสะท้อน อาจทำให้ OCR อ่านบางจุดผิด")
+    if preprocess_profile == "back-id":
+        warnings.append("ระบบเพิ่มความคมชัดให้เลขหลังบัตรก่อนส่ง OCR แล้ว")
 
     if target_size:
         target_w, target_h = target_size
         image_h, image_w = image.shape[:2]
         target_ratio = target_w / target_h
         image_ratio = image_w / max(1, image_h)
-        if target_ratio > 1 and image_ratio < 0.85:
+        if target_ratio > 1 and image_ratio < 0.75:  # เข้มขึ้นจาก 0.85
             image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
             warnings.append("ระบบหมุนภาพให้ตรงกับแนวเอกสารก่อนส่ง OCR")
-
-    image = enhance_for_ocr_cv2(image, cv2, np)
+    image = safe_enhance_for_ocr_cv2(image, cv2, np, brightness, contrast, preprocess_profile)
     if target_size:
         image = resize_to_target_canvas_cv2(image, target_size, cv2, np)
 
@@ -503,6 +549,104 @@ def cv2_preprocess_image(image_bytes, target_size):
 
     meta.update({"outputWidth": int(image.shape[1]), "outputHeight": int(image.shape[0]), "format": "image/jpeg"})
     return encoded.tobytes(), warnings, meta
+
+
+def pillow_preprocess_image(image_bytes, target_size, warnings=None, preprocess_profile=""):
+    from PIL import Image, ImageEnhance, ImageOps, ImageStat
+    import io
+
+    warnings = list(warnings or [])
+    with Image.open(io.BytesIO(image_bytes)) as source:
+        image = ImageOps.exif_transpose(source).convert("RGB")
+
+    gray = ImageOps.grayscale(image)
+    stat = ImageStat.Stat(gray)
+    brightness = float(stat.mean[0])
+    contrast = float(stat.stddev[0])
+    meta = {
+        "inputWidth": image.width,
+        "inputHeight": image.height,
+        "brightness": round(brightness, 2),
+        "contrast": round(contrast, 2),
+        "engine": "pillow-safe",
+    }
+
+    if target_size:
+        target_w, target_h = target_size
+        target_ratio = target_w / target_h
+        image_ratio = image.width / max(1, image.height)
+        if target_ratio > 1 and image_ratio < 0.85:
+            image = image.rotate(-90, expand=True)
+            warnings.append("ระบบหมุนภาพให้ตรงกับแนวเอกสารก่อนส่ง OCR")
+
+    if brightness < 75 or contrast < 24:
+        image = ImageOps.autocontrast(image, cutoff=0.5)
+        image = ImageEnhance.Contrast(image).enhance(1.06)
+    elif brightness > OVEREXPOSED_BRIGHTNESS_THRESHOLD:
+        brightness_factor = max(0.78, min(0.93, BRIGHT_IMAGE_TARGET_MEAN / max(brightness, 1)))
+        image = ImageEnhance.Brightness(image).enhance(brightness_factor)
+        image = ImageOps.autocontrast(image, cutoff=0.3)
+        if contrast < 35:
+            image = ImageEnhance.Contrast(image).enhance(1.04)
+    elif preprocess_profile == "back-id":
+        image = ImageOps.autocontrast(image, cutoff=0.2)
+        image = ImageEnhance.Contrast(image).enhance(1.08)
+        image = ImageEnhance.Sharpness(image).enhance(1.12)
+
+    if target_size:
+        target_w, target_h = target_size
+        image.thumbnail((target_w, target_h), Image.Resampling.LANCZOS)
+        canvas = Image.new("RGB", (target_w, target_h), "white")
+        x = (target_w - image.width) // 2
+        y = (target_h - image.height) // 2
+        canvas.paste(image, (x, y))
+        image = canvas
+
+    output = io.BytesIO()
+    image.save(output, format="JPEG", quality=96, optimize=True)
+    meta.update({"outputWidth": image.width, "outputHeight": image.height, "format": "image/jpeg"})
+    return output.getvalue(), warnings, meta
+
+
+def safe_enhance_for_ocr_cv2(image, cv2, np, brightness, contrast, preprocess_profile=""):
+    if brightness > OVEREXPOSED_BRIGHTNESS_THRESHOLD:
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        lightness, channel_a, channel_b = cv2.split(lab)
+
+        darken_shift = min(38.0, max(10.0, (brightness - BRIGHT_IMAGE_TARGET_MEAN) * 0.65))
+        gamma = min(1.2, 1.06 + ((brightness - OVEREXPOSED_BRIGHTNESS_THRESHOLD) / 255))
+        normalized = lightness.astype("float32") / 255.0
+        darkened_lightness = np.clip((normalized ** gamma) * 255.0 - darken_shift, 0, 255).astype("uint8")
+
+        if contrast < 35:
+            clahe = cv2.createCLAHE(clipLimit=1.15, tileGridSize=(8, 8))
+            darkened_lightness = clahe.apply(darkened_lightness)
+
+        merged = cv2.merge((darkened_lightness, channel_a, channel_b))
+        enhanced = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
+        return np.clip(enhanced, 0, 255).astype("uint8")
+
+    if preprocess_profile == "back-id":
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        lightness, channel_a, channel_b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=1.45, tileGridSize=(8, 8))
+        enhanced_lightness = clahe.apply(lightness)
+        merged = cv2.merge((enhanced_lightness, channel_a, channel_b))
+        enhanced = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
+        blurred = cv2.GaussianBlur(enhanced, (0, 0), sigmaX=0.85)
+        sharpened = cv2.addWeighted(enhanced, 1.32, blurred, -0.32, 0)
+        return np.clip(sharpened, 0, 255).astype("uint8")
+
+    if brightness >= 75 and contrast >= 24:
+        return image
+
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    lightness, channel_a, channel_b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=1.25, tileGridSize=(8, 8))
+    enhanced_lightness = clahe.apply(lightness)
+    merged = cv2.merge((enhanced_lightness, channel_a, channel_b))
+    enhanced = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
+    return np.clip(enhanced, 0, 255).astype("uint8")
 
 
 def enhance_for_ocr_cv2(image, cv2, np):
@@ -552,148 +696,58 @@ def get_ocr_status():
         },
     )
 
-
-@app.post("/api/trace/client-image")
-async def trace_client_image(request: Request):
-    if not is_trace_enabled():
-        return no_store_json(200, {"enabled": False})
-
-    content_type = request.headers.get("content-type", "")
-    if not content_type.startswith("multipart/form-data;"):
-        return no_store_json(400, {"enabled": True, "error": "Expected multipart/form-data"})
-
-    if parse_content_length(request) > MAX_UPLOAD_BYTES:
-        return no_store_json(413, {"enabled": True, "error": "Uploaded file is too large"})
-
-    body = await request.body()
-    if len(body) > MAX_UPLOAD_BYTES:
-        return no_store_json(413, {"enabled": True, "error": "Uploaded file is too large"})
-
-    fields, uploads = parse_multipart_body(body, content_type)
-    upload = uploads[0] if uploads else None
-    if upload is None:
-        return no_store_json(400, {"enabled": True, "error": "Missing uploaded file"})
-
-    stage = fields.get("stage", "client-image")
-    api_id = fields.get("apiId", "")
-    meta = parse_trace_meta(fields.get("meta", ""))
-    trace_run_id = str(meta.get("traceRunId") or fields.get("traceRunId") or "")
-    run_dir = get_trace_run_dir(api_id, trace_run_id)
-    saved_file = safe_trace_call(save_trace_file, run_dir, stage, upload["filename"], upload["content"])
-    safe_trace_call(
-        append_trace_meta,
-        run_dir,
-        {
-            "apiId": api_id,
-            "stage": stage,
-            "filename": upload["filename"],
-            "fileSize": len(upload["content"] or b""),
-            "contentType": upload["content_type"],
-            "outputFile": saved_file,
-            **meta,
-        },
-    )
-    postman_response_file = safe_trace_call(
-        run_postman_like_ocr,
-        PROXY_APIS.get(api_id),
-        api_id,
-        upload["content"],
-        upload["filename"],
-        upload["content_type"],
-        run_dir,
-        stage,
-    )
-    return no_store_json(
-        200,
-        {
-            "enabled": True,
-            "traceFolder": str(run_dir) if run_dir else None,
-            "savedFile": saved_file,
-            "postmanResponseFile": postman_response_file,
-        },
-    )
-
 @app.post("/api/image/preprocess")
 async def preprocess_image_request(request: Request):
     content_type = request.headers.get("content-type", "")
     if not content_type.startswith("multipart/form-data;"):
         return no_store_json(400, {"error": "Expected multipart/form-data"})
 
-    if parse_content_length(request) > MAX_UPLOAD_BYTES:
+    if parse_content_length(request) > MAX_PREPROCESS_REQUEST_BYTES:
         return no_store_json(413, {"error": "Uploaded file is too large"})
 
     body = await request.body()
-    if len(body) > MAX_UPLOAD_BYTES:
+    if len(body) > MAX_PREPROCESS_REQUEST_BYTES:
         return no_store_json(413, {"error": "Uploaded file is too large"})
 
     fields, uploads = parse_multipart_body(body, content_type)
-    upload = uploads[0] if uploads else None
+    upload = next((item for item in uploads if item["name"] == "file"), None)
+    original_upload = next((item for item in uploads if item["name"] == "originalFile"), None) or upload
     if upload is None:
         return no_store_json(400, {"error": "Missing uploaded file"})
 
     if len(upload["content"]) > MAX_UPLOAD_BYTES:
         return no_store_json(413, {"error": "Uploaded file is too large"})
-
-    api_id = fields.get("apiId", "")
-    trace_run_id = fields.get("traceRunId", "")
-    trace_run_dir = get_trace_run_dir(api_id, trace_run_id)
-    trace_input_file = safe_trace_call(
-        save_trace_file,
-        trace_run_dir,
-        "03-preprocess-input",
-        upload["filename"],
-        upload["content"],
-    )
-    safe_trace_call(
-        append_trace_meta,
-        trace_run_dir,
-        {
-            "apiId": api_id,
-            "stage": "03-preprocess-input",
-            "filename": upload["filename"],
-            "fileSize": len(upload["content"] or b""),
-            "contentType": upload["content_type"],
-            "outputFile": trace_input_file,
-        },
-    )
+    if len(original_upload["content"]) > MAX_UPLOAD_BYTES:
+        return no_store_json(413, {"error": "Original uploaded file is too large"})
 
     target_size = get_preprocess_target(fields)
+    preprocess_profile = get_preprocess_profile(fields)
     try:
         image_bytes, warnings, meta = await run_in_threadpool(
             cv2_preprocess_image,
             upload["content"],
             target_size,
+            preprocess_profile,
         )
     except RuntimeError as exc:
-        safe_trace_call(save_trace_json, trace_run_dir, "03-preprocess-error", "03-preprocess-error.json", {"error": str(exc)})
         return no_store_json(503, {"error": str(exc)})
     except ValueError as exc:
-        safe_trace_call(save_trace_json, trace_run_dir, "03-preprocess-error", "03-preprocess-error.json", {"error": str(exc)})
         return no_store_json(400, {"error": str(exc)})
     except Exception:
-        safe_trace_call(save_trace_json, trace_run_dir, "03-preprocess-error", "03-preprocess-error.json", {"error": "Image preprocess failed"})
         return no_store_json(500, {"error": "Image preprocess failed"})
 
+    try:
+        archive_meta = await run_in_threadpool(
+            save_preprocess_images,
+            original_upload,
+            image_bytes,
+            fields.get("apiId", ""),
+        )
+        meta["archive"] = archive_meta
+    except OSError as exc:
+        warnings.append(f"Cannot save preprocess images: {exc}")
+
     filename = Path(upload["filename"] or "upload.jpg").stem
-    trace_output_file = safe_trace_call(
-        save_trace_file,
-        trace_run_dir,
-        "03-after-opencv-preprocess",
-        f"{filename}-cv-ocr.jpg",
-        image_bytes,
-    )
-    safe_trace_call(
-        append_trace_meta,
-        trace_run_dir,
-        {
-            "apiId": api_id,
-            "stage": "03-after-opencv-preprocess",
-            "filename": f"{filename}-cv-ocr.jpg",
-            "fileSize": len(image_bytes or b""),
-            "contentType": "image/jpeg",
-            "outputFile": trace_output_file,
-        },
-    )
     headers = {
         "Cache-Control": "no-store",
         "Content-Disposition": f'inline; filename="{filename}-preprocessed.jpg"',
@@ -734,27 +788,6 @@ async def proxy_ocr_request(request: Request):
 
     filename = Path(upload["filename"] or "upload.jpg").name
     upload_content_type = upload["content_type"] or "application/octet-stream"
-    trace_run_dir = get_trace_run_dir(api_id, fields.get("traceRunId", ""))
-    trace_input_file = safe_trace_call(
-        save_trace_file,
-        trace_run_dir,
-        "04-proxy-before-ocr",
-        filename,
-        upload["content"],
-    )
-    safe_trace_call(
-        append_trace_meta,
-        trace_run_dir,
-        {
-            "apiId": api_id,
-            "stage": "04-proxy-before-ocr",
-            "filename": filename,
-            "fileSize": len(upload["content"] or b""),
-            "contentType": upload_content_type,
-            "outputFile": trace_input_file,
-            "endpointGroup": api["endpoint"],
-        },
-    )
     files = {api["form_file_key"]: (filename, upload["content"], upload_content_type)}
     headers = {api["auth_header_name"]: token} if token else {}
     post_upstream = partial(
@@ -766,54 +799,11 @@ async def proxy_ocr_request(request: Request):
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
 
-    started = time.perf_counter()
     try:
         upstream = await run_in_threadpool(post_upstream)
     except requests.Timeout:
-        runtime_ms = round((time.perf_counter() - started) * 1000)
-        trace_response_file = safe_trace_call(
-            save_trace_json,
-            trace_run_dir,
-            "05-web-ocr-response",
-            "05-web-ocr-response.json",
-            {"error": "OCR request timed out", "apiId": api_id, "endpoint": api["endpoint"], "runtimeMs": runtime_ms},
-        )
-        safe_trace_call(
-            append_trace_meta,
-            trace_run_dir,
-            {
-                "apiId": api_id,
-                "stage": "05-web-ocr-response",
-                "filename": "05-web-ocr-response.json",
-                "outputFile": trace_response_file,
-                "statusCode": 504,
-                "runtimeMs": runtime_ms,
-                "endpointGroup": api["endpoint"],
-            },
-        )
         return no_store_json(504, {"error": "OCR request timed out", "apiId": api_id, "endpoint": api["endpoint"]})
     except requests.RequestException as exc:
-        runtime_ms = round((time.perf_counter() - started) * 1000)
-        trace_response_file = safe_trace_call(
-            save_trace_json,
-            trace_run_dir,
-            "05-web-ocr-response",
-            "05-web-ocr-response.json",
-            {"error": "Cannot connect to upstream OCR API", "apiId": api_id, "endpoint": api["endpoint"], "detail": str(exc), "runtimeMs": runtime_ms},
-        )
-        safe_trace_call(
-            append_trace_meta,
-            trace_run_dir,
-            {
-                "apiId": api_id,
-                "stage": "05-web-ocr-response",
-                "filename": "05-web-ocr-response.json",
-                "outputFile": trace_response_file,
-                "statusCode": 502,
-                "runtimeMs": runtime_ms,
-                "endpointGroup": api["endpoint"],
-            },
-        )
         return no_store_json(
             502,
             {
@@ -824,29 +814,6 @@ async def proxy_ocr_request(request: Request):
             },
         )
 
-    runtime_ms = round((time.perf_counter() - started) * 1000)
-    trace_response_file = safe_trace_call(
-        save_trace_json,
-        trace_run_dir,
-        "05-web-ocr-response",
-        "05-web-ocr-response.json",
-        {**response_body_for_trace(upstream), "runtimeMs": runtime_ms, "apiId": api_id, "endpointGroup": api["endpoint"]},
-    )
-    safe_trace_call(
-        append_trace_meta,
-        trace_run_dir,
-        {
-            "apiId": api_id,
-            "stage": "05-web-ocr-response",
-            "filename": "05-web-ocr-response.json",
-            "fileSize": len(upstream.content or b""),
-            "contentType": upstream.headers.get("Content-Type", ""),
-            "outputFile": trace_response_file,
-            "statusCode": upstream.status_code,
-            "runtimeMs": runtime_ms,
-            "endpointGroup": api["endpoint"],
-        },
-    )
     return Response(
         content=upstream.content,
         status_code=upstream.status_code,
