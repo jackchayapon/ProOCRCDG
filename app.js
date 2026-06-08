@@ -5,6 +5,7 @@ const RUNTIME_CONFIG = {
   REQUEST_TIMEOUT_MS: 45000,
   USE_IMAGE_PREPROCESS: true,
   USE_MOCK_OCR: false,
+  OCR_TRACE_CLIENT: false,
   ...(window.OCR_RUNTIME_CONFIG || {}),
 };
 
@@ -69,7 +70,7 @@ const state = {
   ocrImagePreview: { src: "", key: "", message: "" },
   encodedPayloads: [], selectedEncodedPayloadIndex: 0, encodedPayloadExpanded: false, resultTab: "text",
   mockMode: RUNTIME_CONFIG.USE_MOCK_OCR,
-  debugMode: false, debug: {}, apiStatus: {}, controller: null, loading: false, privacyClearTimer: null,
+  debugMode: false, debug: {}, apiStatus: {}, controller: null, loading: false, privacyClearTimer: null, traceRunId: "",
 };
 const els = {};
 const $ = (id) => document.getElementById(id);
@@ -162,6 +163,28 @@ function setupMobileCollapsibles() {
   else media.addListener(sync);
 }
 
+function createTraceRunId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+async function traceClientImage(stage, file, meta = {}) {
+  if (!file) return;
+  if (!RUNTIME_CONFIG.OCR_TRACE_CLIENT && !state.debugMode) return;
+
+  const formData = new FormData();
+  formData.append("stage", stage);
+  formData.append("apiId", state.selectedApiId || "");
+  formData.append("file", file, file.name || `${stage}.jpg`);
+  formData.append("traceRunId", state.traceRunId || "");
+  formData.append("meta", JSON.stringify({ ...meta, traceRunId: state.traceRunId || "" }));
+
+  try {
+    await fetch("/api/trace/client-image", { method: "POST", body: formData });
+  } catch (error) {
+    if (state.debugMode) console.warn("Trace client image failed", error);
+  }
+}
+
 async function useFile(file) {
   clearCurrentDocument();
   state.page = "home";
@@ -170,6 +193,13 @@ async function useFile(file) {
   state.originalFile = file;
   state.fileKind = getFileKind(file);
   state.isPdfMode = state.fileKind === "pdf";
+  state.traceRunId = createTraceRunId();
+  if (!state.isPdfMode) {
+    void traceClientImage("01-original-upload", file, {
+      fileKind: state.fileKind,
+      isPdfMode: state.isPdfMode,
+    });
+  }
   if (state.isPdfMode) return loadPdfFile(file);
   state.originalImageUrl = URL.createObjectURL(file);
   state.warnings = await analyzeFile(file);
@@ -258,6 +288,10 @@ async function prepareSelectedPdfPageForCrop() {
       ocrResult: null,
       workspaceMode: "crop",
       pdfRenderInfo: { page: pageNumber, scale: PDF_RENDER_SCALE, width: canvas.width, height: canvas.height },
+    });
+    void traceClientImage("01-pdf-page-rendered", imageFile, {
+      pageNumber,
+      scale: PDF_RENDER_SCALE,
     });
     render();
     await detectAndSetCrop(false);
@@ -390,6 +424,10 @@ async function applyCrop() {
     else state.processedFile = processed;
     state.processedImageInfo = await readImageInfo(processed);
     setProcessedImageUrl(processed);
+    void traceClientImage("02-after-canvas-crop", processed, {
+      cropBox: state.cropBox,
+      processedImageInfo: state.processedImageInfo,
+    });
     enterPreviewMode();
   } catch {
     addWarning(state.isPdfMode ? "สร้างภาพหลัง Crop ไม่สำเร็จ กรุณาลอง Apply Crop ใหม่" : "สร้างภาพหลัง Crop ไม่สำเร็จ ระบบจะใช้ไฟล์ต้นฉบับ");
@@ -398,9 +436,9 @@ async function applyCrop() {
 }
 async function skipCrop() {
   if (state.isPdfMode) return showMessage("workspace", "ไฟล์ PDF ต้องเลือกหน้าและ Apply Crop ก่อนเรียก OCR", true);
-  await prepareFullDocumentPreview();
+  await prepareFullDocumentPreview(true);
 }
-async function prepareFullDocumentPreview() {
+async function prepareFullDocumentPreview(traceSkip = false) {
   try {
     state.cropBox = null;
     state.detectedCropBox = null;
@@ -410,6 +448,12 @@ async function prepareFullDocumentPreview() {
       state.processedFile = processed;
       state.processedImageInfo = await readImageInfo(processed);
       setProcessedImageUrl(processed);
+      if (traceSkip) {
+        void traceClientImage("02-after-canvas-skip", processed, {
+          cropSkipped: true,
+          processedImageInfo: state.processedImageInfo,
+        });
+      }
     } else {
       state.processedFile = null;
       state.processedImageInfo = null;
@@ -474,6 +518,11 @@ async function runOcr() {
   const started = performance.now();
   try {
     let file = getOcrFile();
+    void traceClientImage("03-client-before-ocr", file, {
+      workspaceMode: state.workspaceMode,
+      isPdfMode: state.isPdfMode,
+      selectedApiId: state.selectedApiId,
+    });
     state.controller = new AbortController();
     const timeout = setTimeout(() => state.controller.abort("timeout"), RUNTIME_CONFIG.REQUEST_TIMEOUT_MS);
     let payload, status = 200;
@@ -539,12 +588,20 @@ function validateBeforeRunOcr(api) {
   if (!state.mockMode && api.authRequired && state.apiStatus[api.id]?.available === false) return "API Other ยังใช้งานไม่ได้: กรุณากำหนด OCR_OTHER_AUTH_TOKEN ในไฟล์ .env แล้วรัน python OCR/Backend/P2.py ใหม่";
   return "";
 }
-function buildFormData(api, file) { const data = new FormData(); data.append(api.formFileKey, file, file.name); Object.entries(api.extraFormFields || {}).forEach(([key, value]) => data.append(key, String(value))); data.append("apiId", api.id); return data; }
+function buildFormData(api, file) {
+  const data = new FormData();
+  data.append(api.formFileKey, file, file.name);
+  Object.entries(api.extraFormFields || {}).forEach(([key, value]) => data.append(key, String(value)));
+  data.append("apiId", api.id);
+  data.append("traceRunId", state.traceRunId || "");
+  return data;
+}
 async function preprocessBeforeOcr(file, api, signal) {
   if (!RUNTIME_CONFIG.USE_IMAGE_PREPROCESS || !canProcess(file)) return file;
   const data = new FormData();
   data.append("file", file, file.name);
   data.append("apiId", api.id);
+  data.append("traceRunId", state.traceRunId || "");
   data.append("framePreset", api.framePreset || "");
   data.append("documentType", api.documentType || "");
 
@@ -567,6 +624,9 @@ async function preprocessBeforeOcr(file, api, signal) {
       width: meta.outputWidth || state.processedImageInfo?.width || 0,
       height: meta.outputHeight || state.processedImageInfo?.height || 0,
     };
+    void traceClientImage("03-client-after-preprocess", preprocessed, {
+      preprocess: true,
+    });
     return preprocessed;
   } catch (error) {
     if (error.name === "AbortError") throw error;
@@ -1422,6 +1482,7 @@ function clearSensitiveData() {
     encodedPayloads: [],
     selectedEncodedPayloadIndex: 0,
     encodedPayloadExpanded: false,
+    traceRunId: "",
   });
   clearImageElements();
   renderEncodedPayloadPanel();

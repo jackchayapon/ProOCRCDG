@@ -4,6 +4,7 @@ from email.policy import default
 from functools import partial
 from pathlib import Path
 import json
+import time
 import requests
 import uvicorn
 from fastapi import FastAPI, Request
@@ -11,6 +12,14 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 import re
 import unicodedata
+from ocr_trace import (
+    append_trace_meta,
+    get_or_create_trace_run_dir,
+    is_trace_enabled,
+    run_postman_like_ocr,
+    save_trace_file,
+    save_trace_json,
+)
 
 ROOT = Path(__file__).resolve().parent
 FRONTEND_ROOT = Path(os.environ.get("FRONTEND_ROOT", ROOT)).resolve()
@@ -383,6 +392,41 @@ def no_store_json(status_code, payload):
     )
 
 
+def safe_trace_call(func, *args, **kwargs):
+    try:
+        return func(*args, **kwargs)
+    except Exception:
+        return None
+
+
+def parse_trace_meta(value):
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, dict) else {}
+    except (TypeError, json.JSONDecodeError):
+        return {}
+
+
+def get_trace_run_dir(api_id="", trace_run_id=""):
+    return safe_trace_call(get_or_create_trace_run_dir, api_id or None, trace_run_id or None)
+
+
+def response_body_for_trace(response):
+    content_type = response.headers.get("Content-Type", "")
+    try:
+        body = response.json()
+    except ValueError:
+        text = response.text or ""
+        body = {"textPreview": text[:4000], "textLength": len(text)}
+    return {
+        "statusCode": response.status_code,
+        "contentType": content_type,
+        "body": body,
+    }
+
+
 def parse_content_length(request):
     raw_value = request.headers.get("content-length", "0")
     try:
@@ -508,6 +552,67 @@ def get_ocr_status():
         },
     )
 
+
+@app.post("/api/trace/client-image")
+async def trace_client_image(request: Request):
+    if not is_trace_enabled():
+        return no_store_json(200, {"enabled": False})
+
+    content_type = request.headers.get("content-type", "")
+    if not content_type.startswith("multipart/form-data;"):
+        return no_store_json(400, {"enabled": True, "error": "Expected multipart/form-data"})
+
+    if parse_content_length(request) > MAX_UPLOAD_BYTES:
+        return no_store_json(413, {"enabled": True, "error": "Uploaded file is too large"})
+
+    body = await request.body()
+    if len(body) > MAX_UPLOAD_BYTES:
+        return no_store_json(413, {"enabled": True, "error": "Uploaded file is too large"})
+
+    fields, uploads = parse_multipart_body(body, content_type)
+    upload = uploads[0] if uploads else None
+    if upload is None:
+        return no_store_json(400, {"enabled": True, "error": "Missing uploaded file"})
+
+    stage = fields.get("stage", "client-image")
+    api_id = fields.get("apiId", "")
+    meta = parse_trace_meta(fields.get("meta", ""))
+    trace_run_id = str(meta.get("traceRunId") or fields.get("traceRunId") or "")
+    run_dir = get_trace_run_dir(api_id, trace_run_id)
+    saved_file = safe_trace_call(save_trace_file, run_dir, stage, upload["filename"], upload["content"])
+    safe_trace_call(
+        append_trace_meta,
+        run_dir,
+        {
+            "apiId": api_id,
+            "stage": stage,
+            "filename": upload["filename"],
+            "fileSize": len(upload["content"] or b""),
+            "contentType": upload["content_type"],
+            "outputFile": saved_file,
+            **meta,
+        },
+    )
+    postman_response_file = safe_trace_call(
+        run_postman_like_ocr,
+        PROXY_APIS.get(api_id),
+        api_id,
+        upload["content"],
+        upload["filename"],
+        upload["content_type"],
+        run_dir,
+        stage,
+    )
+    return no_store_json(
+        200,
+        {
+            "enabled": True,
+            "traceFolder": str(run_dir) if run_dir else None,
+            "savedFile": saved_file,
+            "postmanResponseFile": postman_response_file,
+        },
+    )
+
 @app.post("/api/image/preprocess")
 async def preprocess_image_request(request: Request):
     content_type = request.headers.get("content-type", "")
@@ -529,6 +634,29 @@ async def preprocess_image_request(request: Request):
     if len(upload["content"]) > MAX_UPLOAD_BYTES:
         return no_store_json(413, {"error": "Uploaded file is too large"})
 
+    api_id = fields.get("apiId", "")
+    trace_run_id = fields.get("traceRunId", "")
+    trace_run_dir = get_trace_run_dir(api_id, trace_run_id)
+    trace_input_file = safe_trace_call(
+        save_trace_file,
+        trace_run_dir,
+        "03-preprocess-input",
+        upload["filename"],
+        upload["content"],
+    )
+    safe_trace_call(
+        append_trace_meta,
+        trace_run_dir,
+        {
+            "apiId": api_id,
+            "stage": "03-preprocess-input",
+            "filename": upload["filename"],
+            "fileSize": len(upload["content"] or b""),
+            "contentType": upload["content_type"],
+            "outputFile": trace_input_file,
+        },
+    )
+
     target_size = get_preprocess_target(fields)
     try:
         image_bytes, warnings, meta = await run_in_threadpool(
@@ -537,13 +665,35 @@ async def preprocess_image_request(request: Request):
             target_size,
         )
     except RuntimeError as exc:
+        safe_trace_call(save_trace_json, trace_run_dir, "03-preprocess-error", "03-preprocess-error.json", {"error": str(exc)})
         return no_store_json(503, {"error": str(exc)})
     except ValueError as exc:
+        safe_trace_call(save_trace_json, trace_run_dir, "03-preprocess-error", "03-preprocess-error.json", {"error": str(exc)})
         return no_store_json(400, {"error": str(exc)})
     except Exception:
+        safe_trace_call(save_trace_json, trace_run_dir, "03-preprocess-error", "03-preprocess-error.json", {"error": "Image preprocess failed"})
         return no_store_json(500, {"error": "Image preprocess failed"})
 
     filename = Path(upload["filename"] or "upload.jpg").stem
+    trace_output_file = safe_trace_call(
+        save_trace_file,
+        trace_run_dir,
+        "03-after-opencv-preprocess",
+        f"{filename}-cv-ocr.jpg",
+        image_bytes,
+    )
+    safe_trace_call(
+        append_trace_meta,
+        trace_run_dir,
+        {
+            "apiId": api_id,
+            "stage": "03-after-opencv-preprocess",
+            "filename": f"{filename}-cv-ocr.jpg",
+            "fileSize": len(image_bytes or b""),
+            "contentType": "image/jpeg",
+            "outputFile": trace_output_file,
+        },
+    )
     headers = {
         "Cache-Control": "no-store",
         "Content-Disposition": f'inline; filename="{filename}-preprocessed.jpg"',
@@ -584,6 +734,27 @@ async def proxy_ocr_request(request: Request):
 
     filename = Path(upload["filename"] or "upload.jpg").name
     upload_content_type = upload["content_type"] or "application/octet-stream"
+    trace_run_dir = get_trace_run_dir(api_id, fields.get("traceRunId", ""))
+    trace_input_file = safe_trace_call(
+        save_trace_file,
+        trace_run_dir,
+        "04-proxy-before-ocr",
+        filename,
+        upload["content"],
+    )
+    safe_trace_call(
+        append_trace_meta,
+        trace_run_dir,
+        {
+            "apiId": api_id,
+            "stage": "04-proxy-before-ocr",
+            "filename": filename,
+            "fileSize": len(upload["content"] or b""),
+            "contentType": upload_content_type,
+            "outputFile": trace_input_file,
+            "endpointGroup": api["endpoint"],
+        },
+    )
     files = {api["form_file_key"]: (filename, upload["content"], upload_content_type)}
     headers = {api["auth_header_name"]: token} if token else {}
     post_upstream = partial(
@@ -595,11 +766,54 @@ async def proxy_ocr_request(request: Request):
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
 
+    started = time.perf_counter()
     try:
         upstream = await run_in_threadpool(post_upstream)
     except requests.Timeout:
+        runtime_ms = round((time.perf_counter() - started) * 1000)
+        trace_response_file = safe_trace_call(
+            save_trace_json,
+            trace_run_dir,
+            "05-web-ocr-response",
+            "05-web-ocr-response.json",
+            {"error": "OCR request timed out", "apiId": api_id, "endpoint": api["endpoint"], "runtimeMs": runtime_ms},
+        )
+        safe_trace_call(
+            append_trace_meta,
+            trace_run_dir,
+            {
+                "apiId": api_id,
+                "stage": "05-web-ocr-response",
+                "filename": "05-web-ocr-response.json",
+                "outputFile": trace_response_file,
+                "statusCode": 504,
+                "runtimeMs": runtime_ms,
+                "endpointGroup": api["endpoint"],
+            },
+        )
         return no_store_json(504, {"error": "OCR request timed out", "apiId": api_id, "endpoint": api["endpoint"]})
     except requests.RequestException as exc:
+        runtime_ms = round((time.perf_counter() - started) * 1000)
+        trace_response_file = safe_trace_call(
+            save_trace_json,
+            trace_run_dir,
+            "05-web-ocr-response",
+            "05-web-ocr-response.json",
+            {"error": "Cannot connect to upstream OCR API", "apiId": api_id, "endpoint": api["endpoint"], "detail": str(exc), "runtimeMs": runtime_ms},
+        )
+        safe_trace_call(
+            append_trace_meta,
+            trace_run_dir,
+            {
+                "apiId": api_id,
+                "stage": "05-web-ocr-response",
+                "filename": "05-web-ocr-response.json",
+                "outputFile": trace_response_file,
+                "statusCode": 502,
+                "runtimeMs": runtime_ms,
+                "endpointGroup": api["endpoint"],
+            },
+        )
         return no_store_json(
             502,
             {
@@ -610,6 +824,29 @@ async def proxy_ocr_request(request: Request):
             },
         )
 
+    runtime_ms = round((time.perf_counter() - started) * 1000)
+    trace_response_file = safe_trace_call(
+        save_trace_json,
+        trace_run_dir,
+        "05-web-ocr-response",
+        "05-web-ocr-response.json",
+        {**response_body_for_trace(upstream), "runtimeMs": runtime_ms, "apiId": api_id, "endpointGroup": api["endpoint"]},
+    )
+    safe_trace_call(
+        append_trace_meta,
+        trace_run_dir,
+        {
+            "apiId": api_id,
+            "stage": "05-web-ocr-response",
+            "filename": "05-web-ocr-response.json",
+            "fileSize": len(upstream.content or b""),
+            "contentType": upstream.headers.get("Content-Type", ""),
+            "outputFile": trace_response_file,
+            "statusCode": upstream.status_code,
+            "runtimeMs": runtime_ms,
+            "endpointGroup": api["endpoint"],
+        },
+    )
     return Response(
         content=upstream.content,
         status_code=upstream.status_code,

@@ -18,6 +18,11 @@ env/
 # Logs and local runtime files
 *.log
 uvicorn*.log
+debug_traces/
+*.trace.jpg
+*.trace.json
+ocr_trace_output/
+.trace/
 
 # OS and editor files
 .DS_Store
