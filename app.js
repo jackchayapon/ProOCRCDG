@@ -504,7 +504,6 @@ async function resizeAndEnhanceImage(file, resizeConfig) {
   canvas.width = target.width; canvas.height = target.height;
   const ctx = canvas.getContext("2d");
   ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.filter = "contrast(1.08) brightness(1.04)";
   ctx.drawImage(img, dx, dy, drawWidth, drawHeight);
   const blob = await canvasToBlob(canvas, target.quality || 0.9);
   return new File([blob], file.name.replace(/\.[^.]+$/, "-ocr.jpg"), { type: "image/jpeg" });
