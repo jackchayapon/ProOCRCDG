@@ -41,9 +41,9 @@ const PRESETS = {
 const ACCEPTED = /\.(pdf|jpe?g|png|tiff?|bmp)$/i;
 const PROCESSABLE = /\.(jpe?g|png|bmp)$/i;
 const MAX_CLIENT_UPLOAD_BYTES = 20 * 1024 * 1024;
-const OCR_RESULT_AUTO_CLEAR_MS = 5 * 60 * 1000;
-const PDF_RENDER_SCALE = 2.2;
+const PDF_RENDER_SCALE = 3;
 const PDF_THUMBNAIL_SCALE = 0.22;
+const NEUTRAL_JPEG_QUALITY = 0.96;
 const DOCUMENT_TARGETS = {
   idCard: { label: "ID Card", width: 1000, height: 630, aspectRatio: 1000 / 630, quality: 0.92, maxUpscale: 2 },
   passport: { label: "Passport", width: 1000, height: 700, aspectRatio: 1000 / 700, quality: 0.92, maxUpscale: 2 },
@@ -65,18 +65,18 @@ const state = {
   cropDrag: null, previewView: { zoom: 1, panX: 0, panY: 0, dragging: false, startX: 0, startY: 0, baseX: 0, baseY: 0 },
   selectedApiId: "front-id", preset: "idCard", stream: null, ocrResult: null, ocrResultClean: null,  ocrCompareView: "side-by-side", warnings: [],
   isPdfMode: false, pdfFile: null, pdfDocument: null, pdfTotalPages: 0, pdfRenderedPages: [],
-  selectedPdfPageIndex: 0, selectedPdfPageImageFile: null, selectedPdfPageImageUrl: "",
-  processedPdfPageFile: null, pdfRenderInfo: null, processedImageInfo: null, pdfOcrResults: [],
+  selectedPdfPageIndex: 0, selectedPdfPageIndexes: [], selectedPdfPageImageFile: null, selectedPdfPageImageFiles: [], selectedPdfPageImageUrl: "", selectedPdfPageImageUrls: [],
+  processedPdfPageFile: null, processedPdfPageFiles: [], processedPdfPageImageUrls: [], processedPdfPageInfos: [], pdfCropBoxes: [], pdfRenderInfo: null, pdfRenderInfos: [], processedImageInfo: null, pdfOcrResults: [],
   ocrImagePreview: { src: "", key: "", message: "" },
   encodedPayloads: [], selectedEncodedPayloadIndex: 0, encodedPayloadExpanded: false, resultTab: "text",
   mockMode: RUNTIME_CONFIG.USE_MOCK_OCR,
-  debugMode: false, debug: {}, apiStatus: {}, controller: null, loading: false, privacyClearTimer: null, traceRunId: "",
+  debugMode: false, debug: {}, apiStatus: {}, controller: null, loading: false, traceRunId: "",
 };
 const els = {};
 const $ = (id) => document.getElementById(id);
 
 document.addEventListener("DOMContentLoaded", () => {
-  ["homePage","cameraPage","previewPage","fileInput","uploadBtn","cameraBtn","backHomeBtn","captureBtn","restartCameraBtn","presetSelect","video","cameraPlaceholder","captureFrame","apiList","cancelOcrBtn","newImageBtn","clearDataBtn","cropStep","previewStep","resultStep","documentPanelTitle","pdfPagePanel","pdfPageTitle","pdfPageMeta","pdfPageGrid","ocrSelectedPdfPageBtn","cropStage","previewImg","previewDoc","previewPlaceholder","cropBox","imageMeta","fileModeBadge","cropToolbar","previewToolbar","comparePanel","compareSummary","compareRawJson","compareCleanJson","copyOriginalJsonBtn","downloadOriginalJsonBtn","copyPostProcessJsonBtn","downloadPostProcessJsonBtn","autoDetectBtn","trimWhiteBtn","resetCropBtn","applyCropBtn","skipCropBtn","zoomOutBtn","zoomInBtn","fitScreenBtn","actualSizeBtn","resetViewBtn","backToPdfPagesBtn","backToCropBtn","runOcrBtn","cropHint","warningList","selectedApiLabel","mockMode","debugMode","debugPanel","debugOutput","textTab","jsonTab","textOutput","customDocumentOutput","jsonOutput","resultMeta","resultImagePanel","ocrFaceImage","ocrImageMessage","encodedPayloadPanel","encodedPayloadSelect","encodedPayloadToggleBtn","encodedPayloadCopyBtn","encodedPayloadOutput","copyJsonBtn","downloadTextBtn","downloadJsonBtn","homeMessage","workspaceMessage","loading","loadingCancelBtn","workCanvas"].forEach((id) => els[id] = $(id));
+  ["homePage","cameraPage","previewPage","fileInput","uploadBtn","cameraBtn","backHomeBtn","captureBtn","restartCameraBtn","presetSelect","video","cameraPlaceholder","captureFrame","apiList","cancelOcrBtn","newImageBtn","clearDataBtn","cropStep","previewStep","resultStep","documentPanelTitle","pdfPagePanel","pdfPageTitle","pdfPageMeta","pdfPageGrid","ocrSelectedPdfPageBtn","cropStage","previewImg","previewDoc","previewPlaceholder","cropBox","pdfPreviewStrip","imageMeta","fileModeBadge","cropToolbar","previewToolbar","comparePanel","compareSummary","compareRawJson","compareCleanJson","copyOriginalJsonBtn","downloadOriginalJsonBtn","copyPostProcessJsonBtn","downloadPostProcessJsonBtn","autoDetectBtn","trimWhiteBtn","resetCropBtn","applyCropBtn","skipCropBtn","zoomOutBtn","zoomInBtn","fitScreenBtn","actualSizeBtn","resetViewBtn","backToPdfPagesBtn","backToCropBtn","runOcrBtn","cropHint","warningList","selectedApiLabel","mockMode","debugMode","debugPanel","debugOutput","textTab","jsonTab","textOutput","customDocumentOutput","jsonOutput","resultMeta","resultImagePanel","ocrFaceImage","ocrImageMessage","encodedPayloadPanel","encodedPayloadSelect","encodedPayloadToggleBtn","encodedPayloadCopyBtn","encodedPayloadOutput","copyJsonBtn","downloadTextBtn","downloadJsonBtn","homeMessage","workspaceMessage","loading","loadingCancelBtn","workCanvas"].forEach((id) => els[id] = $(id));
   renderCameraPresetOptions();
   bindEvents();
   setupMobileCollapsibles();
@@ -107,16 +107,17 @@ function bindEvents() {
   els.resetCropBtn.addEventListener("click", resetCrop);
   els.applyCropBtn.addEventListener("click", applyCrop);
   els.skipCropBtn.addEventListener("click", skipCrop);
-  els.ocrSelectedPdfPageBtn.addEventListener("click", prepareSelectedPdfPageForCrop);
+  els.ocrSelectedPdfPageBtn.addEventListener("click", prepareSelectedPdfPagesForPreview);
   els.pdfPageGrid.addEventListener("click", async (event) => {
     const button = event.target.closest("[data-pdf-page-index]");
     if (!button) return;
-    const nextPageIndex = Number(button.dataset.pdfPageIndex);
-    if (nextPageIndex !== state.selectedPdfPageIndex) {
-      clearSelectedPdfPageData();
-      state.selectedPdfPageIndex = nextPageIndex;
-    }
+    togglePdfPageSelection(Number(button.dataset.pdfPageIndex));
     renderPdfPageSelector();
+  });
+  els.pdfPreviewStrip.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-pdf-preview-position]");
+    if (!button) return;
+    selectPdfPreviewPage(Number(button.dataset.pdfPreviewPosition));
   });
   els.backToPdfPagesBtn.addEventListener("click", backToPdfPages);
   els.backToCropBtn.addEventListener("click", backToCrop);
@@ -230,11 +231,19 @@ async function loadPdfFile(file) {
       pdfTotalPages: pdfDocument.numPages,
       pdfRenderedPages: [],
       selectedPdfPageIndex: 0,
+      selectedPdfPageIndexes: [0],
       selectedPdfPageImageFile: null,
+      selectedPdfPageImageFiles: [],
       selectedPdfPageImageUrl: "",
+      selectedPdfPageImageUrls: [],
       processedPdfPageFile: null,
+      processedPdfPageFiles: [],
+      processedPdfPageImageUrls: [],
+      processedPdfPageInfos: [],
+      pdfCropBoxes: [],
       processedImageInfo: null,
       pdfRenderInfo: null,
+      pdfRenderInfos: [],
       pdfOcrResults: [],
       page: "workspace",
       workspaceMode: "pdf-pages",
@@ -266,45 +275,79 @@ async function renderPdfThumbnails() {
   state.pdfRenderedPages = pages;
 }
 
-async function prepareSelectedPdfPageForCrop() {
+function togglePdfPageSelection(pageIndex) {
+  if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= state.pdfTotalPages) return;
+  const selected = new Set(state.selectedPdfPageIndexes || []);
+  if (selected.has(pageIndex)) selected.delete(pageIndex);
+  else selected.add(pageIndex);
+  const nextIndexes = [...selected].sort((a, b) => a - b);
+  state.selectedPdfPageIndexes = nextIndexes;
+  state.selectedPdfPageIndex = nextIndexes[0] ?? pageIndex;
+  clearOcrResultData();
+}
+
+async function prepareSelectedPdfPagesForPreview() {
   if (!state.pdfDocument) return showMessage("workspace", "กรุณาเลือกไฟล์ PDF ก่อน", true);
+  const selectedIndexes = getSelectedPdfPageIndexes();
+  if (!selectedIndexes.length) return showMessage("workspace", "กรุณาเลือกหน้า PDF อย่างน้อย 1 หน้า", true);
   setLoading(true);
   try {
-    const pageNumber = state.selectedPdfPageIndex + 1;
-    const page = await state.pdfDocument.getPage(pageNumber);
-    clearSelectedPdfPageData();
-    const viewport = page.getViewport({ scale: PDF_RENDER_SCALE });
-    const canvas = els.workCanvas;
-    canvas.width = Math.round(viewport.width);
-    canvas.height = Math.round(viewport.height);
-    await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
-    const blob = await canvasToBlob(canvas, 0.94);
-    const imageFile = new File([blob], `${state.originalFile.name.replace(/\.pdf$/i, "")}-page-${pageNumber}.jpg`, { type: "image/jpeg" });
-    revokeObjectUrl(state.selectedPdfPageImageUrl);
-    setProcessedImageUrl(null);
+    clearSelectedPdfPageData({ keepSelection: true });
+    const renderedPages = [];
+    for (const pageIndex of selectedIndexes) {
+      renderedPages.push(await renderPdfPageToJpeg(pageIndex));
+    }
     Object.assign(state, {
-      selectedPdfPageImageFile: imageFile,
-      selectedPdfPageImageUrl: URL.createObjectURL(imageFile),
-      processedPdfPageFile: null,
-      processedImageInfo: null,
+      selectedPdfPageIndex: selectedIndexes[0],
+      selectedPdfPageImageFiles: renderedPages.map((page) => page.file),
+      selectedPdfPageImageUrls: renderedPages.map((page) => page.url),
+      processedPdfPageFiles: renderedPages.map(() => null),
+      processedPdfPageImageUrls: renderedPages.map(() => ""),
+      processedPdfPageInfos: renderedPages.map(() => null),
+      pdfCropBoxes: renderedPages.map(() => null),
+      pdfRenderInfos: renderedPages.map((page) => page.info),
       cropBox: null,
       detectedCropBox: null,
       manualCropBox: null,
       ocrResult: null,
-      workspaceMode: "crop",
-      pdfRenderInfo: { page: pageNumber, scale: PDF_RENDER_SCALE, width: canvas.width, height: canvas.height },
+      workspaceMode: "preview",
     });
-    void traceClientImage("01-pdf-page-rendered", imageFile, {
-      pageNumber,
-      scale: PDF_RENDER_SCALE,
+    syncActivePdfPageState();
+    renderedPages.forEach((renderedPage, index) => {
+      void traceClientImage("01-pdf-page-rendered", renderedPage.file, {
+        pageNumber: renderedPage.pageNumber,
+        pageIndex: index + 1,
+        pageCount: renderedPages.length,
+        scale: PDF_RENDER_SCALE,
+      });
     });
-    render();
-    await detectAndSetCrop(false);
+    enterPreviewMode();
   } catch (error) {
-    showMessage("workspace", `ไม่สามารถ render หน้า PDF นี้ได้: ${error.message || "กรุณาเลือกหน้าใหม่"}`, true);
+    showMessage("workspace", `ไม่สามารถ render หน้า PDF ที่เลือกได้: ${error.message || "กรุณาเลือกหน้าใหม่"}`, true);
   } finally {
     setLoading(false);
   }
+}
+
+async function renderPdfPageToJpeg(pageIndex) {
+  const pageNumber = pageIndex + 1;
+  const page = await state.pdfDocument.getPage(pageNumber);
+  const viewport = page.getViewport({ scale: PDF_RENDER_SCALE });
+  const canvas = els.workCanvas;
+  canvas.width = Math.round(viewport.width);
+  canvas.height = Math.round(viewport.height);
+  const ctx = canvas.getContext("2d");
+  prepareNeutralCanvasContext(ctx);
+  await page.render({ canvasContext: ctx, viewport }).promise;
+  const blob = await canvasToBlob(canvas, NEUTRAL_JPEG_QUALITY);
+  const file = new File([blob], `${state.originalFile.name.replace(/\.pdf$/i, "")}-page-${pageNumber}.jpg`, { type: "image/jpeg" });
+  return {
+    pageIndex,
+    pageNumber,
+    file,
+    url: URL.createObjectURL(file),
+    info: { page: pageNumber, scale: PDF_RENDER_SCALE, width: canvas.width, height: canvas.height },
+  };
 }
 
 async function openCameraPage() { state.page = "camera"; render(); await startCamera(); }
@@ -346,10 +389,11 @@ async function cropCameraFrameToJpeg(target = getCameraTarget()) {
   const dx = Math.round((target.width - drawWidth) / 2);
   const dy = Math.round((target.height - drawHeight) / 2);
   const ctx = canvas.getContext("2d");
+  prepareNeutralCanvasContext(ctx);
   ctx.fillStyle = "#fff";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(video, sx, sy, sw, sh, dx, dy, drawWidth, drawHeight);
-  return canvasToBlob(canvas, target.quality || 0.92);
+  return canvasToBlob(canvas, Math.max(target.quality || 0.92, NEUTRAL_JPEG_QUALITY));
 }
 
 async function detectAndSetCrop(trimWhite) {
@@ -373,7 +417,7 @@ function detectDocumentBounds(img, trimWhite) {
   const maxSample = 900, scale = Math.min(1, maxSample / Math.max(img.width, img.height));
   const width = Math.max(1, Math.round(img.width * scale)), height = Math.max(1, Math.round(img.height * scale));
   const canvas = els.workCanvas; canvas.width = width; canvas.height = height;
-  const ctx = canvas.getContext("2d"); ctx.drawImage(img, 0, 0, width, height);
+  const ctx = canvas.getContext("2d"); prepareNeutralCanvasContext(ctx); ctx.drawImage(img, 0, 0, width, height);
   const pixels = ctx.getImageData(0, 0, width, height).data;
   const cornerPoints = [[0, 0], [width - 1, 0], [0, height - 1], [width - 1, height - 1]];
   const background = cornerPoints.reduce((sum, [x, y]) => { const i = (y * width + x) * 4; return [sum[0] + pixels[i], sum[1] + pixels[i + 1], sum[2] + pixels[i + 2]]; }, [0, 0, 0]).map((value) => value / 4);
@@ -425,10 +469,18 @@ async function applyCrop() {
     warnForCropAspectRatio();
     const cropped = await cropOriginalImage();
     const processed = await resizeAndEnhanceImage(cropped, getSelectedApi());
-    if (state.isPdfMode) state.processedPdfPageFile = processed;
-    else state.processedFile = processed;
-    state.processedImageInfo = await readImageInfo(processed);
-    setProcessedImageUrl(processed);
+    if (state.isPdfMode) {
+      const pagePosition = getActivePdfPagePosition();
+      state.processedPdfPageFiles[pagePosition] = processed;
+      state.processedPdfPageFile = processed;
+      state.processedPdfPageInfos[pagePosition] = await readImageInfo(processed);
+      state.pdfCropBoxes[pagePosition] = state.cropBox ? { ...state.cropBox } : null;
+      setProcessedPdfPageImageUrl(pagePosition, processed);
+    } else {
+      state.processedFile = processed;
+      setProcessedImageUrl(processed);
+    }
+    state.processedImageInfo = state.isPdfMode ? state.processedPdfPageInfos[getActivePdfPagePosition()] : await readImageInfo(processed);
     void traceClientImage("02-after-canvas-crop", processed, {
       cropBox: state.cropBox,
       processedImageInfo: state.processedImageInfo,
@@ -440,8 +492,29 @@ async function applyCrop() {
   }
 }
 async function skipCrop() {
-  if (state.isPdfMode) return showMessage("workspace", "ไฟล์ PDF ต้องเลือกหน้าและ Apply Crop ก่อนเรียก OCR", true);
+  if (state.isPdfMode) return skipPdfCrop();
   await prepareFullDocumentPreview(true);
+}
+async function skipPdfCrop() {
+  const active = getActivePdfPageState();
+  if (!active.selectedFile) return showMessage("workspace", "กรุณาเลือกหน้า PDF ก่อน", true);
+  const pagePosition = active.position;
+  state.processedPdfPageFiles[pagePosition] = null;
+  state.processedPdfPageFile = null;
+  state.processedPdfPageInfos[pagePosition] = null;
+  state.pdfCropBoxes[pagePosition] = null;
+  setProcessedPdfPageImageUrl(pagePosition, null);
+  state.cropBox = null;
+  state.detectedCropBox = null;
+  state.manualCropBox = null;
+  state.processedImageInfo = await readImageInfo(active.selectedFile);
+  void traceClientImage("02-after-canvas-skip", active.selectedFile, {
+    cropSkipped: true,
+    pdfPageNumber: active.pageIndex + 1,
+    selectedPageCount: state.selectedPdfPageImageFiles.length,
+    processedImageInfo: state.processedImageInfo,
+  });
+  enterPreviewMode();
 }
 async function prepareFullDocumentPreview(traceSkip = false) {
   try {
@@ -478,20 +551,21 @@ async function backToCrop() {
   if (!canProcess(getCropSourceFile())) return;
   clearOcrResultData();
   state.workspaceMode = "crop";
+  syncActivePdfPageState({ preserveCropBox: false });
   render();
   if (!state.cropBox) await detectAndSetCrop(false);
 }
-function backToPdfPages() { clearSelectedPdfPageData(); state.workspaceMode = "pdf-pages"; render(); }
+function backToPdfPages() { clearOcrResultData(); state.workspaceMode = "pdf-pages"; render(); }
 
 async function cropOriginalImage() {
   const sourceFile = getCropSourceFile();
   const img = await loadImage(sourceFile), box = state.cropBox || defaultCropBox(img), canvas = els.workCanvas;
   canvas.width = Math.max(1, Math.round(box.width)); canvas.height = Math.max(1, Math.round(box.height));
   const ctx = canvas.getContext("2d");
-  ctx.filter = "none";
+  prepareNeutralCanvasContext(ctx);
   ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(img, box.x, box.y, box.width, box.height, 0, 0, canvas.width, canvas.height);
-  const blob = await canvasToBlob(canvas, 0.94);
+  const blob = await canvasToBlob(canvas, NEUTRAL_JPEG_QUALITY);
   return new File([blob], sourceFile.name.replace(/\.[^.]+$/, "-crop.jpg"), { type: "image/jpeg" });
 }
 async function resizeAndEnhanceImage(file, resizeConfig) {
@@ -508,9 +582,10 @@ async function resizeAndEnhanceImage(file, resizeConfig) {
   }
   canvas.width = target.width; canvas.height = target.height;
   const ctx = canvas.getContext("2d");
+  prepareNeutralCanvasContext(ctx);
   ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(img, dx, dy, drawWidth, drawHeight);
-  const blob = await canvasToBlob(canvas, target.quality || 0.9);
+  const blob = await canvasToBlob(canvas, Math.max(target.quality || 0.9, NEUTRAL_JPEG_QUALITY));
   return new File([blob], file.name.replace(/\.[^.]+$/, "-ocr.jpg"), { type: "image/jpeg" });
 }
 
@@ -521,11 +596,16 @@ async function runOcr() {
   clearOcrResultData();
   const started = performance.now();
   try {
-    let file = getOcrFile();
-    void traceClientImage("03-client-before-ocr", file, {
-      workspaceMode: state.workspaceMode,
-      isPdfMode: state.isPdfMode,
-      selectedApiId: state.selectedApiId,
+    let files = getOcrFiles();
+    files.forEach((file, index) => {
+      void traceClientImage("03-client-before-ocr", file, {
+        workspaceMode: state.workspaceMode,
+        isPdfMode: state.isPdfMode,
+        selectedApiId: state.selectedApiId,
+        fileIndex: index + 1,
+        fileCount: files.length,
+        pdfPageNumber: state.isPdfMode ? state.selectedPdfPageIndexes[index] + 1 : null,
+      });
     });
     state.controller = new AbortController();
     const timeout = setTimeout(() => state.controller.abort("timeout"), RUNTIME_CONFIG.REQUEST_TIMEOUT_MS);
@@ -533,8 +613,8 @@ async function runOcr() {
     try {
       if (state.mockMode) { await delay(650, state.controller.signal); payload = buildMockResponse(api); }
       else {
-        file = await preprocessBeforeOcr(file, api, state.controller.signal);
-        const formData = buildFormData(api, file);
+        files = await preprocessFilesBeforeOcr(files, api, state.controller.signal);
+        const formData = buildFormData(api, files);
         const response = await fetch(RUNTIME_CONFIG.PROXY_URL, { method: api.method, body: formData, signal: state.controller.signal });
         status = response.status;
         const text = await response.text(); payload = parseJson(text) ?? { response: text };
@@ -547,10 +627,9 @@ async function runOcr() {
     state.encodedPayloads = state.ocrResult.encodedPayloads || [];
     state.selectedEncodedPayloadIndex = 0;
     state.encodedPayloadExpanded = false;
-    state.debug = buildDebugInfo(api, file, status, state.ocrResult.runtime);
+    state.debug = buildDebugInfo(api, files, status, state.ocrResult.runtime);
     els.workspaceMessage.hidden = true;
     render();
-    schedulePrivacyAutoClear();
   } catch (error) {
     const message = error.name === "AbortError" ? "OCR request ถูกยกเลิกหรือใช้เวลานานเกินกำหนด กรุณาลองใหม่" : `เรียก OCR API ไม่สำเร็จ: ${error.message || "กรุณาตรวจสอบการเชื่อมต่อ"}`;
     if (!state.originalFile) return;
@@ -581,24 +660,29 @@ async function runPostprocess(rawPayload, api) {
 function validateBeforeRunOcr(api) {
   if (!state.originalFile) return "กรุณาเลือกไฟล์หรือถ่ายภาพก่อน Run OCR";
   if (state.isPdfMode) {
-    if (!state.selectedPdfPageImageFile) return "ไฟล์ PDF มีหลายหน้า กรุณาเลือกหน้าที่ต้องการ OCR";
-    if (state.workspaceMode !== "preview") return "กรุณาเลือกหน้า PDF และ Apply Crop ก่อนเรียก OCR";
-    if (!state.processedPdfPageFile) return "กรุณา Apply Crop หน้า PDF ก่อนเรียก OCR";
+    if (!state.selectedPdfPageImageFiles.length) return "ไฟล์ PDF มีหลายหน้า กรุณาเลือกหน้าที่ต้องการ OCR";
+    if (state.workspaceMode !== "preview") return "กรุณาเลือกหน้า PDF และตรวจ Preview ก่อนเรียก OCR";
   } else if (state.workspaceMode !== "preview") return "กรุณา Apply Crop หรือ Skip Crop ก่อน Run OCR";
   if (!api?.endpoint || !api.method || !api.formFileKey) return "OCR API config ไม่สมบูรณ์";
-  const file = getOcrFile();
-  if (!file) return "ไม่พบไฟล์สำหรับส่ง OCR";
-  if (file.size > MAX_CLIENT_UPLOAD_BYTES) return "ไฟล์มีขนาดใหญ่เกิน 20MB";
+  const files = getOcrFiles();
+  if (!files.length) return "ไม่พบไฟล์สำหรับส่ง OCR";
+  if (files.reduce((sum, file) => sum + file.size, 0) > MAX_CLIENT_UPLOAD_BYTES) return "ไฟล์มีขนาดใหญ่เกิน 20MB";
   if (!state.mockMode && api.authRequired && state.apiStatus[api.id]?.available === false) return "API Other ยังใช้งานไม่ได้: กรุณากำหนด OCR_OTHER_AUTH_TOKEN ในไฟล์ .env แล้วรัน python OCR/Backend/P2.py ใหม่";
   return "";
 }
-function buildFormData(api, file) {
+function buildFormData(api, fileOrFiles) {
   const data = new FormData();
-  data.append(api.formFileKey, file, file.name);
+  const files = Array.isArray(fileOrFiles) ? fileOrFiles : [fileOrFiles];
+  files.filter(Boolean).forEach((file) => data.append(api.formFileKey, file, file.name));
   Object.entries(api.extraFormFields || {}).forEach(([key, value]) => data.append(key, String(value)));
   data.append("apiId", api.id);
   data.append("traceRunId", state.traceRunId || "");
   return data;
+}
+async function preprocessFilesBeforeOcr(files, api, signal) {
+  const output = [];
+  for (const file of files) output.push(await preprocessBeforeOcr(file, api, signal));
+  return output;
 }
 async function preprocessBeforeOcr(file, api, signal) {
   if (!RUNTIME_CONFIG.USE_IMAGE_PREPROCESS || !canProcess(file)) return file;
@@ -727,53 +811,105 @@ function getApiDisplayLabel(api) {
 function renderWorkspace() {
   if (!state.originalFile) return;
   const pdfPageMode = state.workspaceMode === "pdf-pages", cropMode = state.workspaceMode === "crop", processable = canProcess(getCropSourceFile());
-  els.documentPanelTitle.textContent = pdfPageMode ? "Select PDF Page" : cropMode ? "Crop Document" : "Preview Document";
-  const processedPreview = state.workspaceMode === "preview" && (state.processedFile || state.processedPdfPageFile);
-  const preparedLabel = state.cropBox ? "Crop + Resize + Enhance" : "Prepared + Enhance";
-  els.fileModeBadge.textContent = pdfPageMode ? "PDF Pages" : cropMode ? (state.isPdfMode ? "PDF Page Image" : "Original Image") : processedPreview ? preparedLabel : "Original File";
+  const selectedPdfCount = state.selectedPdfPageImageFiles.length || state.selectedPdfPageIndexes.length;
+  const pdfPreviewMode = state.isPdfMode && state.workspaceMode === "preview";
+  const activePdf = state.isPdfMode ? getActivePdfPageState() : null;
+  const activePdfPrepared = Boolean(activePdf?.processedFile || activePdf?.cropBox);
+  els.documentPanelTitle.textContent = pdfPageMode ? "Select PDF Pages" : cropMode ? "Crop Document" : "Preview Document";
+  const processedPreview = state.workspaceMode === "preview" && (state.processedFile || activePdf?.processedFile || selectedPdfCount);
+  const preparedLabel = state.isPdfMode ? (activePdfPrepared ? "Crop + High Quality Resize" : "Prepared + High Quality") : state.cropBox ? "Crop + High Quality Resize" : "Prepared + High Quality";
+  els.fileModeBadge.textContent = pdfPageMode ? "PDF Pages" : cropMode ? (state.isPdfMode ? "PDF Page Image" : "Original Image") : state.isPdfMode && selectedPdfCount > 1 ? `${selectedPdfCount} PDF Pages` : processedPreview ? preparedLabel : "Original File";
   els.pdfPagePanel.hidden = !pdfPageMode;
   els.cropStage.hidden = pdfPageMode;
+  if (els.pdfPreviewStrip) els.pdfPreviewStrip.hidden = !pdfPreviewMode;
   els.cropToolbar.hidden = !cropMode || !processable;
-  els.skipCropBtn.hidden = state.isPdfMode;
+  els.skipCropBtn.hidden = false;
   els.previewToolbar.hidden = cropMode || pdfPageMode;
   els.backToPdfPagesBtn.hidden = !(state.isPdfMode && state.workspaceMode === "preview");
-  els.cropHint.textContent = pdfPageMode ? "เลือกหน้า PDF ที่ต้องการ OCR ระบบจะ render เป็นภาพ JPG แล้วส่งเข้า Crop Document Mode" : cropMode ? "ลากหรือปรับขนาดกรอบให้ครอบเอกสารทั้งใบ จากนั้นกด Apply Crop" : "ตรวจภาพก่อน Run OCR หากต้องแก้กรอบให้กด Edit / Crop หรือใช้ Zoom / Fit to Screen / 100%";
+  els.cropHint.textContent = pdfPageMode ? "เลือกหน้า PDF ได้มากกว่า 1 หน้า จากนั้นกด Preview Selected Pages" : cropMode ? "ลากหรือปรับขนาดกรอบให้ครอบเอกสารทั้งใบ จากนั้นกด Apply Crop หรือ Skip Crop" : pdfPreviewMode ? "เลือกหน้าในแถบด้านล่างเพื่อดูหรือแก้แต่ละหน้า แล้วกด Run OCR เพื่อส่งทุกหน้าที่เลือก" : "ตรวจภาพก่อน Run OCR หากต้องแก้กรอบให้กด Edit / Crop หรือใช้ Zoom / Fit to Screen / 100%";
   const displayFile = getActiveDisplayFile();
   els.imageMeta.textContent = buildImageMeta(displayFile);
-  renderPdfPageSelector(); renderSteps(); renderDocumentImage(); renderWarnings();
+  renderPdfPageSelector(); renderPdfPreviewStrip(); renderSteps(); renderDocumentImage(); renderWarnings();
 }
 function renderSteps() {
   const hasResult = Boolean(state.ocrResult), previewMode = state.workspaceMode === "preview", cropMode = state.workspaceMode === "crop", pdfPageMode = state.workspaceMode === "pdf-pages";
-  const hasEditedCrop = Boolean(state.cropBox && (state.processedFile || state.processedPdfPageFile));
-  els.cropStep.className = `step ${previewMode && !hasResult ? "active" : hasResult || cropMode || pdfPageMode ? "complete" : ""}`;
-  els.previewStep.className = `step ${cropMode || pdfPageMode ? "active" : hasEditedCrop || hasResult ? "complete" : ""}`;
+  const hasEditedCrop = state.isPdfMode ? state.processedPdfPageFiles.some(Boolean) : Boolean(state.cropBox && state.processedFile);
+  els.cropStep.className = `step ${(previewMode || pdfPageMode) && !hasResult ? "active" : hasResult || cropMode ? "complete" : ""}`;
+  els.previewStep.className = `step ${cropMode ? "active" : hasEditedCrop || hasResult ? "complete" : ""}`;
   els.resultStep.className = `step ${hasResult ? "active" : ""}`;
 }
 function renderPdfPageSelector() {
   if (!state.isPdfMode || !els.pdfPageGrid) return;
+  const selectedIndexes = getSelectedPdfPageIndexes();
+  const selectedPages = selectedIndexes.map((index) => index + 1).join(", ");
   els.pdfPageTitle.textContent = `PDF ทั้งหมด ${state.pdfTotalPages || 0} หน้า`;
-  els.pdfPageMeta.textContent = `เลือกอยู่: Page ${state.selectedPdfPageIndex + 1} of ${state.pdfTotalPages || 0}`;
-  els.ocrSelectedPdfPageBtn.disabled = !state.pdfDocument || !state.pdfRenderedPages.length || state.loading;
+  els.pdfPageMeta.textContent = selectedIndexes.length ? `เลือกแล้ว ${selectedIndexes.length} หน้า: Page ${selectedPages}` : "เลือกหน้าที่ต้องการ OCR";
+  els.ocrSelectedPdfPageBtn.textContent = selectedIndexes.length > 1 ? "Preview Selected Pages" : "Preview Selected Page";
+  els.ocrSelectedPdfPageBtn.disabled = !state.pdfDocument || !state.pdfRenderedPages.length || !selectedIndexes.length || state.loading;
   els.pdfPageGrid.innerHTML = "";
   state.pdfRenderedPages.forEach((page, index) => {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `pdf-page-option ${index === state.selectedPdfPageIndex ? "active" : ""}`;
+    const selected = selectedIndexes.includes(index);
+    button.className = `pdf-page-option ${selected ? "active" : ""}`;
     button.dataset.pdfPageIndex = String(index);
+    button.setAttribute("aria-pressed", selected ? "true" : "false");
     button.appendChild(page.canvas);
     const label = document.createElement("span");
-    label.textContent = `Page ${page.pageNumber}`;
+    label.textContent = selected ? `Selected · Page ${page.pageNumber}` : `Page ${page.pageNumber}`;
     button.appendChild(label);
     els.pdfPageGrid.appendChild(button);
   });
+}
+function renderPdfPreviewStrip() {
+  if (!els.pdfPreviewStrip) return;
+  const show = state.isPdfMode && state.workspaceMode === "preview" && state.selectedPdfPageImageFiles.length;
+  els.pdfPreviewStrip.hidden = !show;
+  if (!show) {
+    els.pdfPreviewStrip.innerHTML = "";
+    return;
+  }
+
+  const selectedIndexes = getSelectedPdfPageIndexes();
+  const activePosition = getActivePdfPagePosition();
+  els.pdfPreviewStrip.innerHTML = state.selectedPdfPageImageFiles.map((file, position) => {
+    const pageNumber = (selectedIndexes[position] ?? position) + 1;
+    const selected = position === activePosition;
+    const cropped = Boolean(state.processedPdfPageFiles[position]);
+    const imageUrl = state.processedPdfPageImageUrls[position] || state.selectedPdfPageImageUrls[position] || "";
+    return `
+      <button class="pdf-preview-option ${selected ? "active" : ""}" data-pdf-preview-position="${position}" type="button" aria-pressed="${selected ? "true" : "false"}">
+        <img src="${escapeHtml(imageUrl)}" alt="PDF page ${pageNumber}" />
+        <span>Page ${pageNumber}</span>
+        <em>${cropped ? "Cropped" : "Original"}</em>
+      </button>
+    `;
+  }).join("");
+}
+function selectPdfPreviewPage(position) {
+  if (!state.isPdfMode || state.workspaceMode !== "preview") return;
+  if (!Number.isInteger(position) || position < 0 || position >= state.selectedPdfPageImageFiles.length) return;
+  const pageIndex = getSelectedPdfPageIndexes()[position];
+  if (!Number.isInteger(pageIndex)) return;
+  state.selectedPdfPageIndex = pageIndex;
+  syncActivePdfPageState();
+  resetPreviewView();
+  render();
 }
 function renderDocumentImage() {
   if (!state.originalFile) return;
   els.previewImg.hidden = true; els.previewDoc.hidden = true; els.previewPlaceholder.hidden = true; els.cropBox.hidden = true;
   if (state.workspaceMode === "pdf-pages") return;
   const file = getActiveDisplayFile(), url = getActiveDisplayUrl();
+  if (!file) { els.previewPlaceholder.textContent = "ไม่พบรูปสำหรับแสดง Preview"; els.previewPlaceholder.hidden = false; return; }
   if (!canProcess(file)) { els.previewPlaceholder.textContent = `${file.name} พร้อมส่งเข้า OCR แต่ Browser ไม่รองรับ Preview/Crop สำหรับไฟล์นี้`; els.previewPlaceholder.hidden = false; return; }
-  els.previewImg.src = url; els.previewImg.hidden = false;
+  if (!url) { els.previewPlaceholder.textContent = "ไม่พบรูปสำหรับแสดง Preview"; els.previewPlaceholder.hidden = false; return; }
+  els.previewImg.hidden = false;
+  if (els.previewImg.dataset.src !== url) {
+    els.previewImg.dataset.src = url;
+    els.previewImg.src = url;
+    return;
+  }
   if (!els.previewImg.naturalWidth) return;
   const fit = getImageFitScale(els.previewImg.naturalWidth, els.previewImg.naturalHeight), zoom = state.workspaceMode === "preview" ? state.previewView.zoom : 1;
   els.previewImg.style.width = `${Math.round(els.previewImg.naturalWidth * fit)}px`; els.previewImg.style.height = `${Math.round(els.previewImg.naturalHeight * fit)}px`;
@@ -987,7 +1123,9 @@ function renderEncodedPayloadPanel() {
   els.encodedPayloadToggleBtn.textContent = state.encodedPayloadExpanded ? "Show Short" : "Show Full";
   els.encodedPayloadOutput.value = state.encodedPayloadExpanded ? payload.value : payload.preview;
 }
-function buildDebugInfo(api, file, status, runtime) {
+function buildDebugInfo(api, fileOrFiles, status, runtime) {
+  const files = Array.isArray(fileOrFiles) ? fileOrFiles.filter(Boolean) : [fileOrFiles].filter(Boolean);
+  const firstFile = files[0];
   return {
     apiId: api.id,
     apiLabel: getApiDisplayLabel(api),
@@ -1003,8 +1141,10 @@ function buildDebugInfo(api, file, status, runtime) {
     mockMode: state.mockMode,
     originalFile: state.originalFile.name,
     originalSize: formatBytes(state.originalFile.size),
-    processedFile: file.name,
-    processedSize: formatBytes(file.size),
+    processedFile: firstFile?.name || "",
+    processedSize: formatBytes(firstFile?.size || 0),
+    processedFiles: files.map((file) => ({ name: file.name, size: formatBytes(file.size) })),
+    processedFileCount: files.length,
     responseStatus: status,
     runtime: `${runtime} ms`,
     pdf: state.isPdfMode ? {
@@ -1012,13 +1152,15 @@ function buildDebugInfo(api, file, status, runtime) {
       totalPages: state.pdfTotalPages,
       selectedPageIndex: state.selectedPdfPageIndex,
       selectedPageNumber: state.selectedPdfPageIndex + 1,
+      selectedPageIndexes: state.selectedPdfPageIndexes,
+      selectedPageNumbers: state.selectedPdfPageIndexes.map((index) => index + 1),
       renderScale: state.pdfRenderInfo?.scale,
       renderedPageWidth: state.pdfRenderInfo?.width,
       renderedPageHeight: state.pdfRenderInfo?.height,
       processedPageWidth: state.processedImageInfo?.width,
       processedPageHeight: state.processedImageInfo?.height,
       processedJpgSize: formatBytes(state.processedPdfPageFile?.size || 0),
-      ocrMode: "selected page",
+      ocrMode: files.length > 1 ? "selected pages" : "selected page",
     } : null,
   };
 }
@@ -1116,50 +1258,75 @@ async function extractImagePreview(payload, api) {
   }
 }
 async function buildUploadedFileImagePreview(decodedPreview, api) {
-  const sourceFile = getOcrImagePreviewSourceFile();
-  if (!sourceFile || !canProcess(sourceFile)) return null;
+  const sourceCandidates = getOcrImagePreviewSourceCandidates().filter((candidate) => candidate.file && canProcess(candidate.file));
+  if (!sourceCandidates.length) return null;
 
   const previewImage = await loadImageFromSrc(decodedPreview.src);
-  const sourceImage = await loadImage(sourceFile);
-  const documentBox = getOcrImagePreviewDocumentBox(sourceImage, sourceFile);
-  const matchedRegion = findUploadedImageMatchRegion(sourceImage, previewImage, documentBox);
-  const region = matchedRegion || getKnownDocumentImageRegion(api, previewImage, documentBox);
-  if (!region) return null;
+  let fallbackPreview = null;
+  for (const candidate of sourceCandidates) {
+    const sourceImage = await loadImage(candidate.file);
+    const documentBox = getOcrImagePreviewDocumentBox(sourceImage, candidate);
+    const matchedRegion = findUploadedImageMatchRegion(sourceImage, previewImage, documentBox);
+    const region = matchedRegion || getKnownDocumentImageRegion(api, previewImage, documentBox);
+    if (!region) continue;
 
+    const preview = renderUploadedImagePreview(sourceImage, previewImage, region, decodedPreview, candidate, Boolean(matchedRegion));
+    if (matchedRegion) return preview;
+    if (!fallbackPreview) fallbackPreview = preview;
+  }
+  return fallbackPreview;
+}
+function renderUploadedImagePreview(sourceImage, previewImage, region, decodedPreview, candidate, matched) {
   const canvas = els.workCanvas;
   canvas.width = previewImage.naturalWidth || previewImage.width;
   canvas.height = previewImage.naturalHeight || previewImage.height;
   const ctx = canvas.getContext("2d");
-  ctx.filter = "none";
+  prepareNeutralCanvasContext(ctx);
   ctx.fillStyle = "#fff";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(sourceImage, region.x, region.y, region.width, region.height, 0, 0, canvas.width, canvas.height);
+  const pageLabel = candidate.pageNumber ? ` · Page ${candidate.pageNumber}` : "";
   return {
     src: canvas.toDataURL("image/jpeg", 0.94),
     key: decodedPreview.key,
-    message: `${matchedRegion ? "Source: preview color match" : "Source: preview fallback"} (${decodedPreview.key})`,
+    message: `${matched ? "Source: preview color match" : "Source: preview fallback"}${pageLabel} (${decodedPreview.key})`,
   };
 }
-function getOcrImagePreviewSourceFile() {
-  if (state.isPdfMode) return state.processedPdfPageFile || state.selectedPdfPageImageFile;
-  return state.processedFile || state.originalFile;
+function getOcrImagePreviewSourceCandidates() {
+  if (!state.isPdfMode) {
+    return [{
+      file: state.processedFile || state.originalFile,
+      rawFile: state.originalFile,
+      cropBox: state.processedFile ? null : state.cropBox,
+      pageNumber: null,
+    }];
+  }
+  const selectedIndexes = getSelectedPdfPageIndexes();
+  return state.selectedPdfPageImageFiles.map((rawFile, position) => {
+    const processedFile = state.processedPdfPageFiles[position] || null;
+    return {
+      file: processedFile || rawFile,
+      rawFile,
+      cropBox: processedFile ? null : state.pdfCropBoxes[position],
+      pageNumber: (selectedIndexes[position] ?? position) + 1,
+    };
+  });
 }
-function getOcrImagePreviewDocumentBox(sourceImage, sourceFile) {
-  const rawSourceFile = state.isPdfMode ? state.selectedPdfPageImageFile : state.originalFile;
-  if (sourceFile === rawSourceFile) return getOriginalDocumentBox(sourceImage);
+function getOcrImagePreviewDocumentBox(sourceImage, candidate) {
+  if (candidate.file === candidate.rawFile) return getOriginalDocumentBox(sourceImage, candidate.cropBox);
   const width = sourceImage.naturalWidth || sourceImage.width;
   const height = sourceImage.naturalHeight || sourceImage.height;
   return { x: 0, y: 0, width, height };
 }
-function getOriginalDocumentBox(sourceImage) {
+function getOriginalDocumentBox(sourceImage, cropBox = state.cropBox) {
   const width = sourceImage.naturalWidth || sourceImage.width;
   const height = sourceImage.naturalHeight || sourceImage.height;
-  if (state.cropBox) {
+  if (cropBox) {
     return {
-      x: Math.max(0, Math.round(state.cropBox.x)),
-      y: Math.max(0, Math.round(state.cropBox.y)),
-      width: Math.max(1, Math.min(width - state.cropBox.x, Math.round(state.cropBox.width))),
-      height: Math.max(1, Math.min(height - state.cropBox.y, Math.round(state.cropBox.height))),
+      x: Math.max(0, Math.round(cropBox.x)),
+      y: Math.max(0, Math.round(cropBox.y)),
+      width: Math.max(1, Math.min(width - cropBox.x, Math.round(cropBox.width))),
+      height: Math.max(1, Math.min(height - cropBox.y, Math.round(cropBox.height))),
     };
   }
   return { x: 0, y: 0, width, height };
@@ -1207,8 +1374,7 @@ function getScaledDocumentImageData(sourceImage, documentBox, maxDimension) {
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  ctx.filter = "none";
-  ctx.imageSmoothingEnabled = true;
+  prepareNeutralCanvasContext(ctx);
   ctx.fillStyle = "#fff";
   ctx.fillRect(0, 0, width, height);
   ctx.drawImage(sourceImage, documentBox.x, documentBox.y, documentBox.width, documentBox.height, 0, 0, width, height);
@@ -1219,8 +1385,7 @@ function getNormalizedImageFeature(image, sampleWidth, sampleHeight) {
   canvas.width = sampleWidth;
   canvas.height = sampleHeight;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  ctx.filter = "none";
-  ctx.imageSmoothingEnabled = true;
+  prepareNeutralCanvasContext(ctx);
   ctx.drawImage(image, 0, 0, sampleWidth, sampleHeight);
   return normalizeFeatureValues(getLumaValues(ctx.getImageData(0, 0, sampleWidth, sampleHeight).data));
 }
@@ -1465,8 +1630,19 @@ async function analyzeFile(file) {
 function loadImage(file) { return new Promise((resolve, reject) => { const url = URL.createObjectURL(file), img = new Image(); img.onload = () => { URL.revokeObjectURL(url); resolve(img); }; img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Cannot load image")); }; img.src = url; }); }
 function loadImageFromSrc(src) { return new Promise((resolve, reject) => { const img = new Image(); img.onload = () => resolve(img); img.onerror = () => reject(new Error("Cannot load image preview")); img.src = src; }); }
 async function readImageInfo(file) { const img = await loadImage(file); return { width: img.width, height: img.height }; }
+function prepareNeutralCanvasContext(ctx) {
+  if (!ctx) return;
+  ctx.filter = "none";
+  ctx.imageSmoothingEnabled = true;
+  if ("imageSmoothingQuality" in ctx) ctx.imageSmoothingQuality = "high";
+}
 function canvasToBlob(canvas, quality) { return new Promise((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Canvas export failed")), "image/jpeg", quality)); }
 function setProcessedImageUrl(file) { revokeObjectUrl(state.processedImageUrl); state.processedImageUrl = file ? URL.createObjectURL(file) : ""; }
+function setProcessedPdfPageImageUrl(position, file) {
+  if (!Array.isArray(state.processedPdfPageImageUrls)) state.processedPdfPageImageUrls = [];
+  revokeObjectUrl(state.processedPdfPageImageUrls[position]);
+  state.processedPdfPageImageUrls[position] = file ? URL.createObjectURL(file) : "";
+}
 function showResultTab(tab) {
   state.resultTab = tab === "json" ? "json" : "text";
   applyResultTabVisibility();
@@ -1503,14 +1679,13 @@ function clearCurrentDocument() {
   resetPreviewView();
 }
 function clearSensitiveData() {
-  clearPrivacyAutoClearTimer();
   abortCurrentRequest();
   state.controller = null;
   setLoading(false);
   stopCamera();
   revokeObjectUrl(state.originalImageUrl);
   revokeObjectUrl(state.processedImageUrl);
-  revokeObjectUrl(state.selectedPdfPageImageUrl);
+  revokePdfPageImageUrls();
   Object.assign(state, {
     originalFile: null,
     originalImageUrl: "",
@@ -1530,10 +1705,18 @@ function clearSensitiveData() {
     pdfTotalPages: 0,
     pdfRenderedPages: [],
     selectedPdfPageIndex: 0,
+    selectedPdfPageIndexes: [],
     selectedPdfPageImageFile: null,
+    selectedPdfPageImageFiles: [],
     selectedPdfPageImageUrl: "",
+    selectedPdfPageImageUrls: [],
     processedPdfPageFile: null,
+    processedPdfPageFiles: [],
+    processedPdfPageImageUrls: [],
+    processedPdfPageInfos: [],
+    pdfCropBoxes: [],
     pdfRenderInfo: null,
+    pdfRenderInfos: [],
     processedImageInfo: null,
     pdfOcrResults: [],
     ocrImagePreview: { src: "", key: "", message: "" },
@@ -1548,7 +1731,6 @@ function clearSensitiveData() {
   if (els.fileInput) els.fileInput.value = "";
 }
 function clearOcrResultData() {
-  clearPrivacyAutoClearTimer();
   state.ocrResult = null;
   state.ocrResultClean = null;
   state.debug = {};
@@ -1559,15 +1741,25 @@ function clearOcrResultData() {
   clearOcrImagePreview();
   renderEncodedPayloadPanel();
 }
-function clearSelectedPdfPageData() {
-  revokeObjectUrl(state.selectedPdfPageImageUrl);
+function clearSelectedPdfPageData(options = {}) {
+  const { keepSelection = false } = options;
+  revokePdfPageImageUrls();
   setProcessedImageUrl(null);
   Object.assign(state, {
+    selectedPdfPageIndex: keepSelection ? state.selectedPdfPageIndex : 0,
+    selectedPdfPageIndexes: keepSelection ? state.selectedPdfPageIndexes : [],
     selectedPdfPageImageFile: null,
+    selectedPdfPageImageFiles: [],
     selectedPdfPageImageUrl: "",
+    selectedPdfPageImageUrls: [],
     processedPdfPageFile: null,
+    processedPdfPageFiles: [],
+    processedPdfPageImageUrls: [],
+    processedPdfPageInfos: [],
+    pdfCropBoxes: [],
     processedImageInfo: null,
     pdfRenderInfo: null,
+    pdfRenderInfos: [],
     cropBox: null,
     detectedCropBox: null,
     manualCropBox: null,
@@ -1575,21 +1767,14 @@ function clearSelectedPdfPageData() {
   clearOcrResultData();
   clearWorkCanvas();
 }
-function schedulePrivacyAutoClear() {
-  clearPrivacyAutoClearTimer();
-  state.privacyClearTimer = window.setTimeout(() => {
-    clearCurrentDocument();
-    state.page = "home";
-    render();
-    showMessage("home", "ระบบล้างข้อมูลเอกสารอัตโนมัติหลังจบ OCR session แล้ว");
-  }, OCR_RESULT_AUTO_CLEAR_MS);
-}
-function clearPrivacyAutoClearTimer() {
-  if (state.privacyClearTimer) window.clearTimeout(state.privacyClearTimer);
-  state.privacyClearTimer = null;
+function revokePdfPageImageUrls() {
+  (state.selectedPdfPageImageUrls || []).forEach(revokeObjectUrl);
+  if (!state.selectedPdfPageImageUrls?.includes(state.selectedPdfPageImageUrl)) revokeObjectUrl(state.selectedPdfPageImageUrl);
+  (state.processedPdfPageImageUrls || []).forEach(revokeObjectUrl);
 }
 function clearImageElements() {
   if (els.previewImg) els.previewImg.removeAttribute("src");
+  if (els.previewImg) delete els.previewImg.dataset.src;
   if (els.previewDoc) els.previewDoc.removeAttribute("data");
   if (els.ocrFaceImage) {
     els.ocrFaceImage.removeAttribute("src");
@@ -1611,23 +1796,80 @@ function addWarning(text) { if (!state.warnings.includes(text)) state.warnings.p
 function getSelectedApi() { return OCR_APIS.find((item) => item.id === state.selectedApiId) || OCR_APIS[0]; }
 function getFileKind(file) { if (/\.pdf$/i.test(file.name)) return "pdf"; if (/\.tiff?$/i.test(file.name)) return "tiff"; return "image"; }
 function canProcess(file) { return Boolean(file && PROCESSABLE.test(file.name)); }
-function getCropSourceFile() { return state.isPdfMode ? state.selectedPdfPageImageFile : state.originalFile; }
-function getOcrFile() { return state.isPdfMode ? state.processedPdfPageFile : state.processedFile || state.originalFile; }
+function getSelectedPdfPageIndexes() {
+  const indexes = (state.selectedPdfPageIndexes || []).filter((index) => Number.isInteger(index) && index >= 0 && index < state.pdfTotalPages);
+  return [...new Set(indexes)].sort((a, b) => a - b);
+}
+function getActivePdfPagePosition() {
+  const indexes = getSelectedPdfPageIndexes();
+  const position = indexes.indexOf(state.selectedPdfPageIndex);
+  return position >= 0 ? position : 0;
+}
+function getActivePdfPageState() {
+  const indexes = getSelectedPdfPageIndexes();
+  const position = getActivePdfPagePosition();
+  const pageIndex = indexes[position] ?? state.selectedPdfPageIndex ?? 0;
+  return {
+    position,
+    pageIndex,
+    selectedFile: state.selectedPdfPageImageFiles[position] || null,
+    selectedUrl: state.selectedPdfPageImageUrls[position] || "",
+    processedFile: state.processedPdfPageFiles[position] || null,
+    processedUrl: state.processedPdfPageImageUrls[position] || "",
+    processedInfo: state.processedPdfPageInfos[position] || null,
+    cropBox: state.pdfCropBoxes[position] || null,
+    renderInfo: state.pdfRenderInfos[position] || null,
+  };
+}
+function syncActivePdfPageState(options = {}) {
+  if (!state.isPdfMode) return;
+  const { preserveCropBox = false } = options;
+  const active = getActivePdfPageState();
+  state.selectedPdfPageIndex = active.pageIndex;
+  state.selectedPdfPageImageFile = active.selectedFile;
+  state.selectedPdfPageImageUrl = active.selectedUrl;
+  state.processedPdfPageFile = active.processedFile;
+  state.pdfRenderInfo = active.renderInfo;
+  state.processedImageInfo = active.processedInfo || active.renderInfo;
+  if (!preserveCropBox) state.cropBox = active.cropBox ? { ...active.cropBox } : null;
+}
+function getCropSourceFile() {
+  if (!state.isPdfMode) return state.originalFile;
+  return getActivePdfPageState().selectedFile;
+}
+function getOcrFiles() {
+  if (state.isPdfMode) {
+    return state.selectedPdfPageImageFiles.map((file, index) => state.processedPdfPageFiles[index] || file).filter(Boolean);
+  }
+  return [state.processedFile || state.originalFile].filter(Boolean);
+}
+function getOcrFile() { return getOcrFiles()[0] || null; }
 function getActiveDisplayFile() {
+  if (state.isPdfMode) {
+    const active = getActivePdfPageState();
+    if (state.workspaceMode === "preview") return active.processedFile || active.selectedFile;
+    return active.selectedFile || state.originalFile;
+  }
   if (state.workspaceMode === "preview") return getOcrFile();
-  if (state.isPdfMode) return state.selectedPdfPageImageFile || state.originalFile;
   return state.originalFile;
 }
 function getActiveDisplayUrl() {
+  if (state.isPdfMode) {
+    const active = getActivePdfPageState();
+    if (state.workspaceMode === "preview" && active.processedFile) return active.processedUrl || active.selectedUrl;
+    return active.selectedUrl;
+  }
   if (state.workspaceMode === "preview" && state.processedImageUrl) return state.processedImageUrl;
-  if (state.isPdfMode) return state.selectedPdfPageImageUrl;
   return state.originalImageUrl;
 }
 function buildImageMeta(file) {
-  if (state.workspaceMode === "pdf-pages") return `${state.originalFile.name} · PDF ทั้งหมด ${state.pdfTotalPages || 0} หน้า`;
+  if (state.workspaceMode === "pdf-pages") return `${state.originalFile.name} · PDF ทั้งหมด ${state.pdfTotalPages || 0} หน้า · เลือกแล้ว ${getSelectedPdfPageIndexes().length} หน้า`;
   if (!file) return state.isPdfMode ? `${state.originalFile.name} · กรุณาเลือกหน้า PDF` : "ยังไม่มีเอกสาร";
-  const pdfPage = state.isPdfMode ? ` · Page ${state.selectedPdfPageIndex + 1} of ${state.pdfTotalPages}` : "";
-  const readyLabel = state.cropBox ? "Cropped / Enhanced / Ready for OCR" : "Prepared / Enhanced / Ready for OCR";
+  const pdfPage = state.isPdfMode ? ` · Page ${state.selectedPdfPageIndex + 1} of ${state.pdfTotalPages} · เลือก ${state.selectedPdfPageImageFiles.length || getSelectedPdfPageIndexes().length} หน้า` : "";
+  const activePdf = state.isPdfMode ? getActivePdfPageState() : null;
+  const readyLabel = state.isPdfMode
+    ? (activePdf?.processedFile ? "Cropped / High Quality / Ready for OCR" : "Prepared / High Quality / Ready for OCR")
+    : (state.cropBox ? "Cropped / High Quality / Ready for OCR" : "Prepared / High Quality / Ready for OCR");
   const dimensions = state.workspaceMode === "preview" && state.processedImageInfo ? ` · ${state.processedImageInfo.width} × ${state.processedImageInfo.height} px · ${readyLabel}` : "";
   return `${file.name}${pdfPage} · ${formatBytes(file.size)}${dimensions}`;
 }

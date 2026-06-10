@@ -975,16 +975,24 @@ async def proxy_ocr_request(request: Request):
     if api.get("auth_env_key") and not token:
         return no_store_json(503, {"error": f"Missing server environment variable: {api['auth_env_key']}"})
 
-    upload = uploads[0] if uploads else None
-    if upload is None:
+    upload_items = [item for item in uploads if item["name"] == api["form_file_key"]] or uploads
+    if not upload_items:
         return no_store_json(400, {"error": "Missing uploaded file"})
 
-    if len(upload["content"]) > MAX_UPLOAD_BYTES:
+    if sum(len(item["content"]) for item in upload_items) > MAX_UPLOAD_BYTES:
         return no_store_json(413, {"error": "Uploaded file is too large"})
 
-    filename = Path(upload["filename"] or "upload.jpg").name
-    upload_content_type = upload["content_type"] or "application/octet-stream"
-    files = {api["form_file_key"]: (filename, upload["content"], upload_content_type)}
+    files = [
+        (
+            api["form_file_key"],
+            (
+                Path(item["filename"] or "upload.jpg").name,
+                item["content"],
+                item["content_type"] or "application/octet-stream",
+            ),
+        )
+        for item in upload_items
+    ]
     headers = {api["auth_header_name"]: token} if token else {}
     post_upstream = partial(
         requests.post,
