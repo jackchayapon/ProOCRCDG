@@ -13,6 +13,13 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 import re
 import unicodedata
+from ocr_trace import (
+    append_trace_meta,
+    get_or_create_trace_run_dir,
+    is_trace_enabled,
+    run_postman_like_ocr,
+    save_trace_file,
+)
 
 ROOT = Path(__file__).resolve().parent
 FRONTEND_ROOT = Path(os.environ.get("FRONTEND_ROOT", ROOT)).resolve()
@@ -376,6 +383,102 @@ def _reorder_fields(value, field_order: list):
     return value
 
 
+CUSTOM_DOCUMENT_TEXT_KEYS = {
+    "0", "text", "texts", "word", "words", "value", "content", "label",
+    "ocrtext", "ocr_text",
+}
+CUSTOM_DOCUMENT_BOX_KEYS = {
+    "1", "bbox", "bboxes", "box", "boxes", "boundary", "boundaries",
+    "boundingbox", "boundingboxes", "bounding_box", "coordinate",
+    "coordinates", "points", "polygon", "vertices",
+}
+
+
+def _normalize_custom_key(value):
+    return re.sub(r"[^a-zA-Z0-9_]+", "", str(value)).lower()
+
+
+def _find_custom_value(item, accepted_keys):
+    for key, value in item.items():
+        if _normalize_custom_key(key) in accepted_keys:
+            return value
+    return None
+
+
+def _normalize_custom_box(value):
+    if isinstance(value, dict):
+        normalized = {_normalize_custom_key(key): child for key, child in value.items()}
+        for keys in (
+            ("x1", "y1", "x2", "y2"),
+            ("xmin", "ymin", "xmax", "ymax"),
+            ("left", "top", "right", "bottom"),
+            ("x", "y", "width", "height"),
+        ):
+            if all(key in normalized for key in keys):
+                return [normalized[key] for key in keys]
+        for key in ("points", "polygon", "vertices", "coordinates"):
+            if key in normalized:
+                return _normalize_custom_box(normalized[key])
+        return value
+    if isinstance(value, (list, tuple)):
+        if len(value) == 1:
+            return _normalize_custom_box(value[0])
+        flattened = []
+        for item in value:
+            normalized_item = _normalize_custom_box(item)
+            if isinstance(normalized_item, list):
+                flattened.extend(normalized_item)
+            else:
+                flattened.append(normalized_item)
+        return flattened
+    return value
+
+
+def extract_custom_document_rows(payload):
+    rows = []
+    seen = set()
+
+    def add_row(text, box):
+        if text is None or isinstance(text, (dict, list, tuple)):
+            return
+        text_value = str(text).strip()
+        if not text_value:
+            return
+        box_value = _normalize_custom_box(box)
+        identity = (
+            text_value,
+            json.dumps(box_value, ensure_ascii=False, sort_keys=True, default=str),
+        )
+        if identity in seen:
+            return
+        seen.add(identity)
+        rows.append({"index": len(rows) + 1, "text": text_value, "box": box_value})
+
+    def walk(value, depth=0):
+        if depth > 12:
+            return
+        if isinstance(value, (list, tuple)):
+            if len(value) == 2 and not isinstance(value[0], (dict, list, tuple)):
+                add_row(value[0], value[1])
+            else:
+                for item in value:
+                    walk(item, depth + 1)
+            return
+        if not isinstance(value, dict):
+            return
+
+        text_value = _find_custom_value(value, CUSTOM_DOCUMENT_TEXT_KEYS)
+        box_value = _find_custom_value(value, CUSTOM_DOCUMENT_BOX_KEYS)
+        if text_value is not None and box_value is not None:
+            add_row(text_value, box_value)
+
+        for child in value.values():
+            walk(child, depth + 1)
+
+    walk(payload)
+    return rows
+
+
 def postprocess_ocr(raw_payload: dict, api_id: str = "") -> dict:
     changes: list[str] = []
 
@@ -395,8 +498,15 @@ def postprocess_ocr(raw_payload: dict, api_id: str = "") -> dict:
     if field_order:
         changes.append(f"field order profile: {api_id}")
 
+    custom_document_rows = []
+    if api_id == "custom-document":
+        custom_document_rows = extract_custom_document_rows(raw_payload)
+        if custom_document_rows:
+            reordered = {"customDocumentRows": custom_document_rows}
+            changes.append(f"custom document rows: {len(custom_document_rows)}")
+
     unique_changes = list(dict.fromkeys(changes))
-    return {
+    result = {
         "normalized": reordered,
         "originalKeys": list(raw_payload.keys()) if isinstance(raw_payload, dict) else [],
         "changes": unique_changes,
@@ -405,6 +515,9 @@ def postprocess_ocr(raw_payload: dict, api_id: str = "") -> dict:
             f"Applied {len(unique_changes)} change(s)" if unique_changes else "No changes"
         ),
     }
+    if custom_document_rows:
+        result["customDocumentRows"] = custom_document_rows
+    return result
 
 
 
@@ -414,6 +527,27 @@ def no_store_json(status_code, payload):
         content=payload,
         headers={"Cache-Control": "no-store"},
     )
+
+
+def safe_trace_call(func, *args, **kwargs):
+    try:
+        return func(*args, **kwargs)
+    except Exception:
+        return None
+
+
+def parse_trace_meta(value):
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, dict) else {}
+    except (TypeError, json.JSONDecodeError):
+        return {}
+
+
+def get_trace_run_dir(api_id="", trace_run_id=""):
+    return safe_trace_call(get_or_create_trace_run_dir, api_id or None, trace_run_id or None)
 
 
 def parse_content_length(request):
@@ -695,6 +829,68 @@ def get_ocr_status():
             }
         },
     )
+
+
+@app.post("/api/trace/client-image")
+async def trace_client_image(request: Request):
+    if not is_trace_enabled():
+        return no_store_json(200, {"enabled": False})
+
+    content_type = request.headers.get("content-type", "")
+    if not content_type.startswith("multipart/form-data;"):
+        return no_store_json(400, {"enabled": True, "error": "Expected multipart/form-data"})
+
+    if parse_content_length(request) > MAX_UPLOAD_BYTES:
+        return no_store_json(413, {"enabled": True, "error": "Uploaded file is too large"})
+
+    body = await request.body()
+    if len(body) > MAX_UPLOAD_BYTES:
+        return no_store_json(413, {"enabled": True, "error": "Uploaded file is too large"})
+
+    fields, uploads = parse_multipart_body(body, content_type)
+    upload = uploads[0] if uploads else None
+    if upload is None:
+        return no_store_json(400, {"enabled": True, "error": "Missing uploaded file"})
+
+    stage = fields.get("stage", "client-image")
+    api_id = fields.get("apiId", "")
+    meta = parse_trace_meta(fields.get("meta", ""))
+    trace_run_id = str(meta.get("traceRunId") or fields.get("traceRunId") or "")
+    run_dir = get_trace_run_dir(api_id, trace_run_id)
+    saved_file = safe_trace_call(save_trace_file, run_dir, stage, upload["filename"], upload["content"])
+    safe_trace_call(
+        append_trace_meta,
+        run_dir,
+        {
+            "apiId": api_id,
+            "stage": stage,
+            "filename": upload["filename"],
+            "fileSize": len(upload["content"] or b""),
+            "contentType": upload["content_type"],
+            "outputFile": saved_file,
+            **meta,
+        },
+    )
+    postman_response_file = safe_trace_call(
+        run_postman_like_ocr,
+        PROXY_APIS.get(api_id),
+        api_id,
+        upload["content"],
+        upload["filename"],
+        upload["content_type"],
+        run_dir,
+        stage,
+    )
+    return no_store_json(
+        200,
+        {
+            "enabled": True,
+            "traceFolder": str(run_dir) if run_dir else None,
+            "savedFile": saved_file,
+            "postmanResponseFile": postman_response_file,
+        },
+    )
+
 
 @app.post("/api/image/preprocess")
 async def preprocess_image_request(request: Request):

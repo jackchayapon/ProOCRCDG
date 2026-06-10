@@ -11,6 +11,7 @@ import requests
 
 TRUE_VALUES = {"true", "1", "yes", "on"}
 DEFAULT_TRACE_DIR = "debug_traces"
+PROJECT_ROOT = Path(__file__).resolve().parent
 SENSITIVE_KEY_RE = re.compile(
     r"(?:base64|b64|idpic|image|face|photo|portrait|picture|compress|blob)",
     re.IGNORECASE,
@@ -39,7 +40,10 @@ def sanitize_name(value: Any) -> str:
 
 
 def _trace_root() -> Path:
-    return Path(os.environ.get("OCR_TRACE_DIR", DEFAULT_TRACE_DIR)).expanduser().resolve()
+    root = Path(os.environ.get("OCR_TRACE_DIR", DEFAULT_TRACE_DIR)).expanduser()
+    if not root.is_absolute():
+        root = PROJECT_ROOT / root
+    return root.resolve()
 
 
 def _timestamp_id() -> str:

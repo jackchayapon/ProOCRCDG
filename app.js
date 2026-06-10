@@ -76,7 +76,7 @@ const els = {};
 const $ = (id) => document.getElementById(id);
 
 document.addEventListener("DOMContentLoaded", () => {
-  ["homePage","cameraPage","previewPage","fileInput","uploadBtn","cameraBtn","backHomeBtn","captureBtn","restartCameraBtn","presetSelect","video","cameraPlaceholder","captureFrame","apiList","cancelOcrBtn","newImageBtn","clearDataBtn","cropStep","previewStep","resultStep","documentPanelTitle","pdfPagePanel","pdfPageTitle","pdfPageMeta","pdfPageGrid","ocrSelectedPdfPageBtn","cropStage","previewImg","previewDoc","previewPlaceholder","cropBox","imageMeta","fileModeBadge","cropToolbar","previewToolbar","comparePanel","compareSummary","compareRawJson","compareCleanJson","copyOriginalJsonBtn","downloadOriginalJsonBtn","copyPostProcessJsonBtn","downloadPostProcessJsonBtn","autoDetectBtn","trimWhiteBtn","resetCropBtn","applyCropBtn","skipCropBtn","zoomOutBtn","zoomInBtn","fitScreenBtn","actualSizeBtn","resetViewBtn","backToPdfPagesBtn","backToCropBtn","runOcrBtn","cropHint","warningList","selectedApiLabel","mockMode","debugMode","debugPanel","debugOutput","textTab","jsonTab","textOutput","jsonOutput","resultMeta","resultImagePanel","ocrFaceImage","ocrImageMessage","encodedPayloadPanel","encodedPayloadSelect","encodedPayloadToggleBtn","encodedPayloadCopyBtn","encodedPayloadOutput","copyJsonBtn","downloadTextBtn","downloadJsonBtn","homeMessage","workspaceMessage","loading","loadingCancelBtn","workCanvas"].forEach((id) => els[id] = $(id));
+  ["homePage","cameraPage","previewPage","fileInput","uploadBtn","cameraBtn","backHomeBtn","captureBtn","restartCameraBtn","presetSelect","video","cameraPlaceholder","captureFrame","apiList","cancelOcrBtn","newImageBtn","clearDataBtn","cropStep","previewStep","resultStep","documentPanelTitle","pdfPagePanel","pdfPageTitle","pdfPageMeta","pdfPageGrid","ocrSelectedPdfPageBtn","cropStage","previewImg","previewDoc","previewPlaceholder","cropBox","imageMeta","fileModeBadge","cropToolbar","previewToolbar","comparePanel","compareSummary","compareRawJson","compareCleanJson","copyOriginalJsonBtn","downloadOriginalJsonBtn","copyPostProcessJsonBtn","downloadPostProcessJsonBtn","autoDetectBtn","trimWhiteBtn","resetCropBtn","applyCropBtn","skipCropBtn","zoomOutBtn","zoomInBtn","fitScreenBtn","actualSizeBtn","resetViewBtn","backToPdfPagesBtn","backToCropBtn","runOcrBtn","cropHint","warningList","selectedApiLabel","mockMode","debugMode","debugPanel","debugOutput","textTab","jsonTab","textOutput","customDocumentOutput","jsonOutput","resultMeta","resultImagePanel","ocrFaceImage","ocrImageMessage","encodedPayloadPanel","encodedPayloadSelect","encodedPayloadToggleBtn","encodedPayloadCopyBtn","encodedPayloadOutput","copyJsonBtn","downloadTextBtn","downloadJsonBtn","homeMessage","workspaceMessage","loading","loadingCancelBtn","workCanvas"].forEach((id) => els[id] = $(id));
   renderCameraPresetOptions();
   bindEvents();
   setupMobileCollapsibles();
@@ -167,9 +167,14 @@ function createTraceRunId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
+function isLocalTraceHost() {
+  const host = window.location.hostname;
+  return host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+}
+
 async function traceClientImage(stage, file, meta = {}) {
   if (!file) return;
-  if (!RUNTIME_CONFIG.OCR_TRACE_CLIENT && !state.debugMode) return;
+  if (!isLocalTraceHost() && !RUNTIME_CONFIG.OCR_TRACE_CLIENT) return;
 
   const formData = new FormData();
   formData.append("stage", stage);
@@ -793,6 +798,7 @@ function getImageFitScale(width, height) { return Math.min(els.cropStage.clientW
 function renderWarnings() { els.warningList.hidden = !state.warnings.length; els.warningList.innerHTML = state.warnings.map((warning) => `<div>• ${escapeHtml(warning)}</div>`).join(""); }
 function renderResult() {
   els.textOutput.textContent = getDisplayPlainText();
+  renderCustomDocumentOutput();
   const displayJson = getDisplayJsonPayload();
   els.jsonOutput.textContent = displayJson ? JSON.stringify(displayJson, null, 2) : "กด Run OCR เพื่อดู JSON";
   els.resultMeta.textContent = state.ocrResult ? `${state.ocrResult.apiLabel} · ${state.ocrResult.runtime} ms` : "พร้อมประมวลผล";
@@ -804,6 +810,49 @@ function renderResult() {
   renderEncodedPayloadPanel();
   applyResultTabVisibility();
   renderComparePanel();
+}
+function renderCustomDocumentOutput() {
+  if (!els.customDocumentOutput) return;
+  const rows = getCustomDocumentRows();
+  if (!rows.length) {
+    els.customDocumentOutput.hidden = true;
+    els.customDocumentOutput.innerHTML = "";
+    return;
+  }
+
+  els.customDocumentOutput.innerHTML = `
+    <table class="custom-document-table">
+      <thead>
+        <tr>
+          <th>Text</th>
+          <th>Box</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map((row, index) => `
+          <tr>
+            <td><span class="custom-row-number">${escapeHtml(row.index ?? index + 1)}.</span> ${escapeHtml(row.text ?? "")}</td>
+            <td>${escapeHtml(formatCustomDocumentBox(row.box))}</td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+}
+function getCustomDocumentRows() {
+  const candidates = [
+    state.ocrResultClean?.customDocumentRows,
+    state.ocrResultClean?.normalized?.customDocumentRows,
+    state.ocrResult?.fields?.customDocumentRows,
+    state.ocrResult?.rawJson?.customDocumentRows,
+  ];
+  return candidates.find((value) => Array.isArray(value) && value.length) || [];
+}
+function formatCustomDocumentBox(value) {
+  if (value == null || value === "") return "-";
+  if (Array.isArray(value)) return value.map((item) => typeof item === "object" ? JSON.stringify(item) : String(item)).join(", ");
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
 }
 function renderComparePanel() {
   const panel = els.comparePanel;
@@ -1427,7 +1476,9 @@ function showResultTab(tab) {
 function applyResultTabVisibility() {
   const json = state.resultTab === "json";
   const hasCompareJson = Boolean(state.ocrResult && state.ocrResultClean);
-  els.textOutput.hidden = json;
+  const hasCustomDocumentRows = Boolean(getCustomDocumentRows().length);
+  els.textOutput.hidden = json || hasCustomDocumentRows;
+  if (els.customDocumentOutput) els.customDocumentOutput.hidden = json || !hasCustomDocumentRows;
   els.jsonOutput.hidden = !json || hasCompareJson;
   els.textTab.classList.toggle("active", !json);
   els.jsonTab.classList.toggle("active", json);

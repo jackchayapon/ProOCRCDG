@@ -12,7 +12,17 @@ OCR_TRACE_AUTO_OCR=true
 OCR_TRACE_DIR=debug_traces
 ```
 
-Frontend runtime config:
+Trace files are written under:
+
+```text
+debug_traces/
+  .gitkeep
+  YYYYMMDD-HHMMSS-ms-apiId/
+```
+
+Only `.gitkeep` is tracked by git. Real trace images and JSON files are ignored and should stay local.
+
+On `localhost` or `127.0.0.1`, the frontend sends trace checkpoints automatically. For a non-local dev host, enable the runtime config before `app.js`:
 
 ```html
 <script>
@@ -22,7 +32,7 @@ Frontend runtime config:
 </script>
 ```
 
-You can also use the app Debug Mode toggle to allow client trace requests while testing.
+Use `OCR_TRACE_AUTO_OCR=false` when you only want physical image files without extra OCR API calls.
 
 ## Disable For Production
 
